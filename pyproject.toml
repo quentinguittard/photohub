@@ -15,7 +15,7 @@ dependencies = [
 
 [project.optional-dependencies]
 fluent = [
-  "PyQt-Fluent-Widgets>=1.8.6",
+  "PySide6-Fluent-Widgets>=1.8.6",
 ]
 
 [project.scripts]

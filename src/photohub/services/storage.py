@@ -8,6 +8,7 @@ from pathlib import Path
 from ..config import (
     compute_app_data_dir_from_root,
     load_settings,
+    normalize_accent_color,
     resolve_app_paths,
     save_settings,
 )
@@ -31,6 +32,13 @@ class StorageService:
 
     def get_settings(self) -> dict:
         return load_settings()
+
+    def set_accent_color(self, accent_color: str) -> str:
+        normalized = normalize_accent_color(accent_color)
+        settings = load_settings()
+        settings["accent_color"] = normalized
+        save_settings(settings)
+        return normalized
 
     def set_global_storage_root(self, new_root: str | Path) -> MigrationResult:
         if self._migration_running:
