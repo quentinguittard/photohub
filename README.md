@@ -13,6 +13,7 @@ PhotoHub is a cross-platform desktop toolbox for photographers (Windows/macOS), 
 - contact sheet PDF generation
 - background jobs with progress/cancel for import/export/culling batch
 - simple preset model: create a preset, then assign it to a project
+- Sprint UI-1 shell: Fluent-inspired navigation, top bar context, dashboard, jobs center
 
 ## Quick start
 

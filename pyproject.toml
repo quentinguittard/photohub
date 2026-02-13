@@ -13,6 +13,11 @@ dependencies = [
   "Pillow>=10.0",
 ]
 
+[project.optional-dependencies]
+fluent = [
+  "PyQt-Fluent-Widgets>=1.8.6",
+]
+
 [project.scripts]
 photohub = "photohub.main:main"
 

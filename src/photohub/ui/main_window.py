@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QObject, QThread, Qt, Signal
-from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QIcon, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSplitter,
     QSpinBox,
+    QStackedWidget,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -41,6 +43,20 @@ from ..services import (
     ProjectService,
     StorageService,
 )
+
+try:
+    from qfluentwidgets import (
+        FluentIcon as FIF,
+        PushButton as FluentPushButton,
+        SearchLineEdit as FluentSearchLineEdit,
+    )
+
+    QFLUENT_AVAILABLE = True
+except Exception:  # pragma: no cover - optional UI dependency
+    FIF = None
+    FluentPushButton = None
+    FluentSearchLineEdit = None
+    QFLUENT_AVAILABLE = False
 
 
 class JobWorker(QObject):
@@ -78,7 +94,116 @@ class JobWorker(QObject):
         self.progress.emit(int(done), int(total), str(detail))
 
 
+class DashboardTab(QWidget):
+    def __init__(self, project_service: ProjectService, get_active_jobs: Callable[[], int]) -> None:
+        super().__init__()
+        self.project_service = project_service
+        self.get_active_jobs = get_active_jobs
+
+        layout = QVBoxLayout(self)
+        title = QLabel("Dashboard Studio")
+        title.setObjectName("PageTitle")
+        layout.addWidget(title)
+
+        cards_row = QHBoxLayout()
+        self.total_projects_label = self._build_card(cards_row, "Projets", "0")
+        self.to_import_label = self._build_card(cards_row, "A importer", "0")
+        self.ready_label = self._build_card(cards_row, "Prets a livrer", "0")
+        self.jobs_label = self._build_card(cards_row, "Jobs actifs", "0")
+        layout.addLayout(cards_row)
+
+        recent_box = QGroupBox("Projets recents")
+        recent_layout = QVBoxLayout(recent_box)
+        self.recent_table = QTableWidget(0, 4)
+        self.recent_table.setHorizontalHeaderLabels(["Nom", "Client", "Statut", "Date"])
+        self.recent_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.recent_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.recent_table.horizontalHeader().setStretchLastSection(True)
+        recent_layout.addWidget(self.recent_table)
+        layout.addWidget(recent_box, 1)
+
+    def refresh_data(self) -> None:
+        projects = self.project_service.list_projects()
+        total = len(projects)
+        to_import = len([p for p in projects if p.status == "a_importer"])
+        ready = len([p for p in projects if p.status == "pret_a_livrer"])
+        active_jobs = int(self.get_active_jobs())
+
+        self.total_projects_label.setText(str(total))
+        self.to_import_label.setText(str(to_import))
+        self.ready_label.setText(str(ready))
+        self.jobs_label.setText(str(active_jobs))
+
+        recent = projects[:10]
+        self.recent_table.setRowCount(len(recent))
+        for row, project in enumerate(recent):
+            self.recent_table.setItem(row, 0, QTableWidgetItem(project.name))
+            self.recent_table.setItem(row, 1, QTableWidgetItem(project.client.name if project.client else "-"))
+            self.recent_table.setItem(row, 2, QTableWidgetItem(self.project_service.get_status_label(project.status)))
+            self.recent_table.setItem(row, 3, QTableWidgetItem(project.shoot_date.strftime("%Y-%m-%d")))
+        self.recent_table.resizeColumnsToContents()
+
+    @staticmethod
+    def _build_card(parent_layout: QHBoxLayout, title: str, value: str) -> QLabel:
+        box = QGroupBox(title)
+        box.setObjectName("StatCard")
+        card_layout = QVBoxLayout(box)
+        value_label = QLabel(value)
+        value_label.setObjectName("StatValue")
+        card_layout.addWidget(value_label)
+        parent_layout.addWidget(box, 1)
+        return value_label
+
+
+class JobsTab(QWidget):
+    def __init__(self, get_active_jobs: Callable[[], int]) -> None:
+        super().__init__()
+        self.get_active_jobs = get_active_jobs
+
+        layout = QVBoxLayout(self)
+        header = QHBoxLayout()
+        title = QLabel("Centre de Jobs")
+        title.setObjectName("PageTitle")
+        self.jobs_state_label = QLabel("0 en cours")
+        clear_btn = QPushButton("Vider journal")
+        clear_btn.clicked.connect(self._clear_logs)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.jobs_state_label)
+        header.addWidget(clear_btn)
+        layout.addLayout(header)
+
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        layout.addWidget(self.log_text, 1)
+
+    def refresh_data(self) -> None:
+        active = int(self.get_active_jobs())
+        if active <= 0:
+            self.jobs_state_label.setText("Aucun job en cours")
+        else:
+            self.jobs_state_label.setText(f"{active} job(s) en cours")
+
+    def add_event(self, message: str) -> None:
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.log_text.appendPlainText(f"[{stamp}] {message}")
+
+    def _clear_logs(self) -> None:
+        self.log_text.clear()
+
+
 class MainWindow(QMainWindow):
+    NAV_ITEMS = [
+        ("dashboard", "Dashboard", "HOME"),
+        ("projects", "Projets", "ALBUM"),
+        ("ingest", "Ingest", "DOWNLOAD"),
+        ("culling", "Tri", "CUT"),
+        ("export", "Export", "SEND"),
+        ("presets", "Presets", "EDIT"),
+        ("settings", "Settings", "SETTING"),
+        ("jobs", "Jobs", "SYNC"),
+    ]
+
     def __init__(
         self,
         project_service: ProjectService,
@@ -99,12 +224,69 @@ class MainWindow(QMainWindow):
         self.on_reload_runtime = on_reload_runtime
         self.active_ops_count = 0
 
-        self.setWindowTitle("PhotoHub - Toolbox")
-        self.resize(1200, 760)
+        self.setWindowTitle("PhotoHub - Studio Workflow")
+        self.resize(1400, 860)
 
-        tabs = QTabWidget()
-        self.setCentralWidget(tabs)
+        root = QWidget()
+        root_layout = QHBoxLayout(root)
+        root_layout.setContentsMargins(12, 12, 12, 12)
+        root_layout.setSpacing(10)
 
+        self.current_nav_key = ""
+        self.nav_buttons: dict[str, QPushButton] = {}
+
+        nav_panel = QWidget()
+        nav_panel.setObjectName("SideBar")
+        nav_panel.setFixedWidth(220)
+        nav_layout = QVBoxLayout(nav_panel)
+        nav_layout.setContentsMargins(10, 10, 10, 10)
+        nav_layout.setSpacing(6)
+
+        top_keys = ["dashboard", "projects", "ingest", "culling", "export", "presets"]
+        bottom_keys = ["jobs", "settings"]
+        for key in top_keys:
+            button = self._build_nav_button(key)
+            self.nav_buttons[key] = button
+            nav_layout.addWidget(button)
+        nav_layout.addStretch(1)
+        for key in bottom_keys:
+            button = self._build_nav_button(key)
+            self.nav_buttons[key] = button
+            nav_layout.addWidget(button)
+
+        root_layout.addWidget(nav_panel)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(10)
+
+        topbar = QGroupBox()
+        topbar.setObjectName("TopBar")
+        topbar_layout = QHBoxLayout(topbar)
+        topbar_layout.setContentsMargins(12, 8, 12, 8)
+
+        app_title = QLabel("PhotoHub")
+        app_title.setObjectName("AppTitle")
+        self.search_edit = self._build_search_line_edit()
+        self.search_edit.setPlaceholderText("Recherche projet (nom, client, statut)")
+        self.search_edit.textChanged.connect(self._on_search_text_changed)
+
+        self.project_context_combo = QComboBox()
+        self.project_context_combo.currentIndexChanged.connect(self._on_project_context_changed)
+        self.activity_badge = QLabel("Aucun job")
+        self.activity_badge.setObjectName("ActivityBadge")
+
+        topbar_layout.addWidget(app_title)
+        topbar_layout.addSpacing(8)
+        topbar_layout.addWidget(self.search_edit, 1)
+        topbar_layout.addWidget(QLabel("Projet actif"))
+        topbar_layout.addWidget(self.project_context_combo)
+        topbar_layout.addWidget(self.activity_badge)
+        content_layout.addWidget(topbar)
+
+        self.stack = QStackedWidget()
+        self.dashboard_tab = DashboardTab(self.project_service, get_active_jobs=self._get_active_jobs_count)
         self.hub_tab = HubTab(self.project_service, self.preset_service, on_data_changed=self.refresh_all)
         self.import_export_tab = ImportExportTab(
             project_service=self.project_service,
@@ -115,6 +297,7 @@ class MainWindow(QMainWindow):
             on_data_changed=self.refresh_all,
             on_operation_started=self._on_operation_started,
             on_operation_ended=self._on_operation_ended,
+            on_job_event=self._append_job_event,
         )
         self.presets_tab = PresetTab(self.preset_service, on_data_changed=self.refresh_all)
         self.settings_tab = SettingsTab(
@@ -122,22 +305,157 @@ class MainWindow(QMainWindow):
             is_busy=self.is_busy,
             on_migration_completed=self._reload_runtime_after_migration,
         )
+        self.jobs_tab = JobsTab(get_active_jobs=self._get_active_jobs_count)
 
-        tabs.addTab(self.hub_tab, "Hub Projets")
-        tabs.addTab(self.import_export_tab, "Import & Export")
-        tabs.addTab(self.presets_tab, "Presets")
-        tabs.addTab(self.settings_tab, "Settings")
+        self.stack.addWidget(self.dashboard_tab)
+        self.stack.addWidget(self.hub_tab)
+        self.stack.addWidget(self.import_export_tab)
+        self.stack.addWidget(self.presets_tab)
+        self.stack.addWidget(self.settings_tab)
+        self.stack.addWidget(self.jobs_tab)
+        content_layout.addWidget(self.stack, 1)
+        root_layout.addWidget(content, 1)
+        self.setCentralWidget(root)
+
+        self._apply_sprint1_style()
+        self._switch_page("dashboard")
 
         self.refresh_all()
+
+    def _get_active_jobs_count(self) -> int:
+        return int(self.active_ops_count)
 
     def is_busy(self) -> bool:
         return self.active_ops_count > 0
 
     def _on_operation_started(self) -> None:
         self.active_ops_count += 1
+        self._update_activity_badge()
+        self.jobs_tab.refresh_data()
 
     def _on_operation_ended(self) -> None:
         self.active_ops_count = max(0, self.active_ops_count - 1)
+        self._update_activity_badge()
+        self.jobs_tab.refresh_data()
+
+    def _append_job_event(self, message: str) -> None:
+        self.jobs_tab.add_event(message)
+
+    def _build_search_line_edit(self):
+        if QFLUENT_AVAILABLE and FluentSearchLineEdit is not None:
+            return FluentSearchLineEdit()
+        return QLineEdit()
+
+    def _build_nav_button(self, key: str) -> QPushButton:
+        label = key
+        icon_name = ""
+        for nav_key, nav_label, nav_icon_name in self.NAV_ITEMS:
+            if nav_key == key:
+                label = nav_label
+                icon_name = nav_icon_name
+                break
+
+        if QFLUENT_AVAILABLE and FluentPushButton is not None:
+            button = FluentPushButton(label)
+        else:
+            button = QPushButton(label)
+
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setProperty("navButton", True)
+        button.setProperty("navKey", key)
+        button.setProperty("active", "false")
+        icon = self._fluent_icon(icon_name)
+        if not icon.isNull():
+            button.setIcon(icon)
+        button.clicked.connect(lambda _checked=False, k=key: self._switch_page(k))
+        return button
+
+    def _fluent_icon(self, icon_name: str) -> QIcon:
+        if not QFLUENT_AVAILABLE or FIF is None or not icon_name:
+            return QIcon()
+        icon_ref = getattr(FIF, icon_name, None)
+        if icon_ref is None:
+            return QIcon()
+        try:
+            icon = icon_ref.icon()
+            if isinstance(icon, QIcon):
+                return icon
+        except Exception:
+            pass
+        try:
+            if isinstance(icon_ref, QIcon):
+                return icon_ref
+        except Exception:
+            pass
+        return QIcon()
+
+    def _switch_page(self, key: str) -> None:
+        normalized = (key or "").strip().lower()
+        if not normalized:
+            return
+        self.current_nav_key = normalized
+        for nav_key, button in self.nav_buttons.items():
+            button.setProperty("active", "true" if nav_key == normalized else "false")
+            button.style().unpolish(button)
+            button.style().polish(button)
+            button.update()
+
+        if normalized == "dashboard":
+            self.stack.setCurrentWidget(self.dashboard_tab)
+        elif normalized == "projects":
+            self.stack.setCurrentWidget(self.hub_tab)
+        elif normalized == "ingest":
+            self.stack.setCurrentWidget(self.import_export_tab)
+            self.import_export_tab.set_current_section("import")
+        elif normalized == "culling":
+            self.stack.setCurrentWidget(self.import_export_tab)
+            self.import_export_tab.set_current_section("culling")
+        elif normalized == "export":
+            self.stack.setCurrentWidget(self.import_export_tab)
+            self.import_export_tab.set_current_section("export")
+        elif normalized == "presets":
+            self.stack.setCurrentWidget(self.presets_tab)
+        elif normalized == "settings":
+            self.stack.setCurrentWidget(self.settings_tab)
+        elif normalized == "jobs":
+            self.stack.setCurrentWidget(self.jobs_tab)
+
+    def _update_activity_badge(self) -> None:
+        active = self._get_active_jobs_count()
+        if active <= 0:
+            self.activity_badge.setText("Aucun job")
+            return
+        self.activity_badge.setText(f"{active} job(s)")
+
+    def _refresh_project_context_combo(self) -> None:
+        current = self.project_context_combo.currentData()
+        projects = self.project_service.list_projects()
+
+        self.project_context_combo.blockSignals(True)
+        self.project_context_combo.clear()
+        self.project_context_combo.addItem("Aucun contexte", None)
+        for project in projects:
+            self.project_context_combo.addItem(project.name, project.id)
+
+        target_idx = 0
+        if current is not None:
+            idx = self.project_context_combo.findData(current)
+            if idx >= 0:
+                target_idx = idx
+        self.project_context_combo.setCurrentIndex(target_idx)
+        self.project_context_combo.blockSignals(False)
+
+        self._on_project_context_changed()
+
+    def _on_project_context_changed(self) -> None:
+        project_id = self.project_context_combo.currentData()
+        if project_id is None:
+            return
+        self.import_export_tab.set_selected_project(int(project_id))
+        self.hub_tab.select_project_by_id(int(project_id))
+
+    def _on_search_text_changed(self, value: str) -> None:
+        self.hub_tab.set_name_filter(value.strip())
 
     def _reload_runtime_after_migration(self) -> None:
         runtime = self.on_reload_runtime()
@@ -147,6 +465,7 @@ class MainWindow(QMainWindow):
         self.import_service = runtime.import_service
         self.export_service = runtime.export_service
 
+        self.dashboard_tab.project_service = self.project_service
         self.hub_tab.project_service = self.project_service
         self.hub_tab.preset_service = self.preset_service
         self.import_export_tab.import_tab.project_service = self.project_service
@@ -157,13 +476,116 @@ class MainWindow(QMainWindow):
         self.import_export_tab.export_tab.preset_service = self.preset_service
         self.import_export_tab.export_tab.export_service = self.export_service
         self.presets_tab.preset_service = self.preset_service
+        self._append_job_event("Migration stockage terminee et runtime recharge.")
         self.refresh_all()
 
     def refresh_all(self) -> None:
+        self.dashboard_tab.refresh_data()
         self.hub_tab.refresh_data()
         self.import_export_tab.refresh_data()
         self.presets_tab.refresh_data()
         self.settings_tab.refresh_data()
+        self._refresh_project_context_combo()
+        self.jobs_tab.refresh_data()
+        self._update_activity_badge()
+
+    def _apply_sprint1_style(self) -> None:
+        self.setStyleSheet(
+            """
+            QWidget {
+                background: #f4f7fb;
+                color: #10243e;
+                font-size: 12px;
+            }
+            QWidget#SideBar {
+                background: #0f2742;
+                border: none;
+                border-radius: 14px;
+                color: #dbe8f7;
+                padding: 8px;
+            }
+            QPushButton[navButton="true"] {
+                text-align: left;
+                border-radius: 8px;
+                padding: 10px 10px;
+                margin: 2px 0;
+                border: 1px solid transparent;
+                background: transparent;
+                color: #dbe8f7;
+            }
+            QPushButton[navButton="true"]:hover {
+                background: #173855;
+                border-color: #2e587b;
+            }
+            QPushButton[navButton="true"][active="true"] {
+                background: #1f4f78;
+                border-color: #3d7bad;
+                color: #ffffff;
+            }
+            #TopBar {
+                border: 1px solid #d7e3f1;
+                border-radius: 12px;
+                background: #ffffff;
+            }
+            #AppTitle {
+                font-size: 18px;
+                font-weight: 700;
+                color: #0f2742;
+            }
+            #ActivityBadge {
+                border: 1px solid #b8cde3;
+                border-radius: 10px;
+                padding: 4px 10px;
+                background: #eaf3fb;
+                color: #20456b;
+                font-weight: 600;
+            }
+            #PageTitle {
+                font-size: 20px;
+                font-weight: 700;
+                color: #0f2742;
+            }
+            #StatCard {
+                border: 1px solid #d7e3f1;
+                border-radius: 12px;
+                background: #ffffff;
+            }
+            #StatValue {
+                font-size: 26px;
+                font-weight: 700;
+                color: #143656;
+            }
+            QGroupBox {
+                border: 1px solid #d7e3f1;
+                border-radius: 10px;
+                margin-top: 8px;
+                padding-top: 8px;
+                background: #ffffff;
+            }
+            QGroupBox::title {
+                left: 10px;
+                padding: 0 4px;
+            }
+            QLineEdit, QComboBox, QDateEdit, QSpinBox, QPlainTextEdit, QTableWidget {
+                border: 1px solid #c5d6e8;
+                border-radius: 8px;
+                background: #ffffff;
+                padding: 4px 6px;
+            }
+            QPushButton {
+                border: 1px solid #2f6ea1;
+                border-radius: 8px;
+                background: #2f6ea1;
+                color: #ffffff;
+                padding: 6px 12px;
+            }
+            QPushButton:disabled {
+                background: #94abc3;
+                border-color: #94abc3;
+                color: #f2f6fa;
+            }
+            """
+        )
 
 
 class HubTab(QWidget):
@@ -172,6 +594,7 @@ class HubTab(QWidget):
         self.project_service = project_service
         self.preset_service = preset_service
         self.on_data_changed = on_data_changed
+        self._name_filter = ""
 
         layout = QVBoxLayout(self)
 
@@ -255,6 +678,7 @@ class HubTab(QWidget):
         layout.addWidget(self.project_table)
 
     def refresh_data(self) -> None:
+        selected_project_id = self._selected_project_id()
         presets = self.preset_service.list_presets()
         self.preset_combo.blockSignals(True)
         self.assign_combo.blockSignals(True)
@@ -269,8 +693,25 @@ class HubTab(QWidget):
         self.assign_combo.blockSignals(False)
 
         projects = self.project_service.list_projects()
-        self.project_table.setRowCount(len(projects))
-        for row, project in enumerate(projects):
+        filtered_projects = projects
+        if self._name_filter:
+            term = self._name_filter.lower()
+            filtered_projects = [
+                project
+                for project in projects
+                if term
+                in " ".join(
+                    [
+                        project.name,
+                        project.client.name if project.client else "",
+                        self.project_service.get_status_label(project.status),
+                    ]
+                ).lower()
+            ]
+
+        self.project_table.setRowCount(len(filtered_projects))
+        selected_row = -1
+        for row, project in enumerate(filtered_projects):
             self.project_table.setItem(row, 0, QTableWidgetItem(str(project.id)))
             self.project_table.setItem(row, 1, QTableWidgetItem(project.name))
             self.project_table.setItem(row, 2, QTableWidgetItem(project.client.name if project.client else "-"))
@@ -282,8 +723,37 @@ class HubTab(QWidget):
             )
             self.project_table.setItem(row, 5, QTableWidgetItem(project.preset.name if project.preset else "-"))
             self.project_table.setItem(row, 6, QTableWidgetItem(project.root_path))
+            if selected_project_id is not None and project.id == selected_project_id:
+                selected_row = row
         self.project_table.resizeColumnsToContents()
+        if selected_row >= 0:
+            self.project_table.selectRow(selected_row)
+        elif self.project_table.rowCount() > 0:
+            self.project_table.selectRow(0)
         self._sync_controls_with_selected_project()
+
+    def set_name_filter(self, value: str) -> None:
+        self._name_filter = value.strip()
+        self.refresh_data()
+
+    def select_project_by_id(self, project_id: int) -> None:
+        for row in range(self.project_table.rowCount()):
+            item = self.project_table.item(row, 0)
+            if item is None:
+                continue
+            if int(item.text()) == int(project_id):
+                self.project_table.selectRow(row)
+                self._sync_controls_with_selected_project()
+                return
+
+    def _selected_project_id(self) -> int | None:
+        row = self.project_table.currentRow()
+        if row < 0:
+            return None
+        item = self.project_table.item(row, 0)
+        if item is None:
+            return None
+        return int(item.text())
 
     def _toggle_custom_location(self, enabled: bool) -> None:
         self.custom_location_edit.setEnabled(enabled)
@@ -393,6 +863,7 @@ class ImportExportTab(QWidget):
         on_data_changed,
         on_operation_started,
         on_operation_ended,
+        on_job_event=None,
     ) -> None:
         super().__init__()
         self.import_tab = ImportTab(
@@ -401,6 +872,7 @@ class ImportExportTab(QWidget):
             on_data_changed=on_data_changed,
             on_operation_started=on_operation_started,
             on_operation_ended=on_operation_ended,
+            on_job_event=on_job_event,
         )
         self.culling_tab = CullingTab(
             project_service=project_service,
@@ -408,6 +880,7 @@ class ImportExportTab(QWidget):
             on_data_changed=on_data_changed,
             on_operation_started=on_operation_started,
             on_operation_ended=on_operation_ended,
+            on_job_event=on_job_event,
         )
         self.export_tab = ExportTab(
             project_service,
@@ -415,19 +888,39 @@ class ImportExportTab(QWidget):
             export_service,
             on_operation_started=on_operation_started,
             on_operation_ended=on_operation_ended,
+            on_job_event=on_job_event,
         )
 
         layout = QVBoxLayout(self)
-        sections = QTabWidget()
-        sections.addTab(self.import_tab, "Import")
-        sections.addTab(self.culling_tab, "Tri")
-        sections.addTab(self.export_tab, "Export")
-        layout.addWidget(sections)
+        self.sections = QTabWidget()
+        self.sections.addTab(self.import_tab, "Import")
+        self.sections.addTab(self.culling_tab, "Tri")
+        self.sections.addTab(self.export_tab, "Export")
+        layout.addWidget(self.sections)
 
     def refresh_data(self) -> None:
         self.import_tab.refresh_data()
         self.culling_tab.refresh_data()
         self.export_tab.refresh_data()
+
+    def set_current_section(self, section: str) -> None:
+        normalized = (section or "").strip().lower()
+        index_map = {
+            "import": 0,
+            "ingest": 0,
+            "culling": 1,
+            "tri": 1,
+            "export": 2,
+        }
+        idx = index_map.get(normalized)
+        if idx is None:
+            return
+        self.sections.setCurrentIndex(idx)
+
+    def set_selected_project(self, project_id: int) -> None:
+        self.import_tab.set_selected_project(project_id)
+        self.culling_tab.set_selected_project(project_id)
+        self.export_tab.set_selected_project(project_id)
 
 
 class ImportTab(QWidget):
@@ -438,6 +931,7 @@ class ImportTab(QWidget):
         on_data_changed,
         on_operation_started,
         on_operation_ended,
+        on_job_event=None,
     ) -> None:
         super().__init__()
         self.project_service = project_service
@@ -445,6 +939,7 @@ class ImportTab(QWidget):
         self.on_data_changed = on_data_changed
         self.on_operation_started = on_operation_started
         self.on_operation_ended = on_operation_ended
+        self.on_job_event = on_job_event or (lambda _message: None)
         self._job_thread: QThread | None = None
         self._job_worker: JobWorker | None = None
 
@@ -501,6 +996,11 @@ class ImportTab(QWidget):
                 self.project_combo.setCurrentIndex(idx)
         self.project_combo.blockSignals(False)
 
+    def set_selected_project(self, project_id: int) -> None:
+        idx = self.project_combo.findData(project_id)
+        if idx >= 0:
+            self.project_combo.setCurrentIndex(idx)
+
     def _pick_source(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Choisir dossier source")
         if directory:
@@ -523,6 +1023,7 @@ class ImportTab(QWidget):
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         self.on_operation_started()
+        self.on_job_event(f"[Import] Lancement du job pour projet ID {project_id}.")
 
         worker = JobWorker(self.import_service.run_import, project_id=project_id, source_dir=source)
         thread = QThread(self)
@@ -543,6 +1044,7 @@ class ImportTab(QWidget):
         if self._job_worker is not None:
             self._job_worker.cancel()
             self.cancel_btn.setEnabled(False)
+            self.on_job_event("[Import] Annulation demandee par l'utilisateur.")
 
     def _on_import_progress(self, done: int, total: int, detail: str) -> None:
         safe_total = max(1, int(total))
@@ -556,9 +1058,13 @@ class ImportTab(QWidget):
         )
         if result.message:
             self.log_text.appendPlainText(result.message)
+        self.on_job_event(
+            f"[Import] {result.status} | total={result.total}, copied={result.copied}, failed={result.failed}"
+        )
         self.on_data_changed()
 
     def _on_import_error(self, message: str) -> None:
+        self.on_job_event(f"[Import] Erreur: {message}")
         QMessageBox.critical(self, "Erreur import", message)
 
     def _on_import_finished(self) -> None:
@@ -567,6 +1073,7 @@ class ImportTab(QWidget):
         self.on_operation_ended()
         self._job_worker = None
         self._job_thread = None
+        self.on_job_event("[Import] Job termine.")
 
 
 class CullingTab(QWidget):
@@ -577,6 +1084,7 @@ class CullingTab(QWidget):
         on_data_changed,
         on_operation_started,
         on_operation_ended,
+        on_job_event=None,
     ) -> None:
         super().__init__()
         self.project_service = project_service
@@ -584,6 +1092,7 @@ class CullingTab(QWidget):
         self.on_data_changed = on_data_changed
         self.on_operation_started = on_operation_started
         self.on_operation_ended = on_operation_ended
+        self.on_job_event = on_job_event or (lambda _message: None)
         self._shortcut_refs: list[QShortcut] = []
         self._job_thread: QThread | None = None
         self._job_worker: JobWorker | None = None
@@ -723,6 +1232,11 @@ class CullingTab(QWidget):
         self.project_combo.blockSignals(False)
         self._load_assets()
 
+    def set_selected_project(self, project_id: int) -> None:
+        idx = self.project_combo.findData(project_id)
+        if idx >= 0:
+            self.project_combo.setCurrentIndex(idx)
+
     def _load_assets(self) -> None:
         project_id = self.project_combo.currentData()
         if project_id is None:
@@ -855,6 +1369,7 @@ class CullingTab(QWidget):
         self.batch_progress.setValue(0)
         self.batch_cancel_btn.setEnabled(True)
         self.on_operation_started()
+        self.on_job_event(f"[Tri] Lancement batch sur projet ID {project_id}.")
 
         worker = JobWorker(
             self.culling_service.bulk_update_filtered,
@@ -882,6 +1397,7 @@ class CullingTab(QWidget):
         if self._job_worker is not None:
             self._job_worker.cancel()
             self.batch_cancel_btn.setEnabled(False)
+            self.on_job_event("[Tri] Annulation batch demandee par l'utilisateur.")
 
     def _on_batch_progress(self, done: int, total: int, detail: str) -> None:
         safe_total = max(1, int(total))
@@ -891,6 +1407,7 @@ class CullingTab(QWidget):
     def _on_batch_result(self, result) -> None:
         self._load_assets()
         self.on_data_changed()
+        self.on_job_event(f"[Tri] {result.status} | maj={result.updated}/{result.total}")
         QMessageBox.information(
             self,
             "Batch tri",
@@ -898,6 +1415,7 @@ class CullingTab(QWidget):
         )
 
     def _on_batch_error(self, message: str) -> None:
+        self.on_job_event(f"[Tri] Erreur batch: {message}")
         QMessageBox.critical(self, "Erreur batch tri", message)
 
     def _on_batch_finished(self) -> None:
@@ -905,6 +1423,7 @@ class CullingTab(QWidget):
         self.on_operation_ended()
         self._job_worker = None
         self._job_thread = None
+        self.on_job_event("[Tri] Job batch termine.")
 
 
 class ExportTab(QWidget):
@@ -915,6 +1434,7 @@ class ExportTab(QWidget):
         export_service: ExportService,
         on_operation_started,
         on_operation_ended,
+        on_job_event=None,
     ) -> None:
         super().__init__()
         self.project_service = project_service
@@ -922,6 +1442,7 @@ class ExportTab(QWidget):
         self.export_service = export_service
         self.on_operation_started = on_operation_started
         self.on_operation_ended = on_operation_ended
+        self.on_job_event = on_job_event or (lambda _message: None)
         self._last_auto_destination = ""
         self._job_thread: QThread | None = None
         self._job_worker: JobWorker | None = None
@@ -1010,6 +1531,11 @@ class ExportTab(QWidget):
         self.project_combo.blockSignals(False)
         self._sync_export_context()
 
+    def set_selected_project(self, project_id: int) -> None:
+        idx = self.project_combo.findData(project_id)
+        if idx >= 0:
+            self.project_combo.setCurrentIndex(idx)
+
     def _sync_export_context(self) -> None:
         project_id = self.project_combo.currentData()
         if project_id is None:
@@ -1072,6 +1598,7 @@ class ExportTab(QWidget):
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         self.on_operation_started()
+        self.on_job_event(f"[Export] Lancement du job pour projet ID {project_id}.")
 
         min_rating = int(self.min_rating_combo.currentData() or 0)
         worker = JobWorker(
@@ -1102,6 +1629,7 @@ class ExportTab(QWidget):
         if self._job_worker is not None:
             self._job_worker.cancel()
             self.cancel_btn.setEnabled(False)
+            self.on_job_event("[Export] Annulation demandee par l'utilisateur.")
 
     def _on_export_progress(self, done: int, total: int, detail: str) -> None:
         safe_total = max(1, int(total))
@@ -1109,11 +1637,15 @@ class ExportTab(QWidget):
         self.progress_bar.setValue(max(0, min(int(done), safe_total)))
 
     def _on_export_result(self, batch) -> None:
+        total_exported = 0
+        total_failed = 0
         for item in batch.profiles:
             self.log_text.appendPlainText(
                 f"Export {item.profile}: {item.status} | exported={item.exported}, "
                 f"failed={item.failed} | out={item.output_dir}"
             )
+            total_exported += int(item.exported)
+            total_failed += int(item.failed)
             if item.message:
                 self.log_text.appendPlainText(item.message)
         if batch.report_path is not None:
@@ -1122,8 +1654,12 @@ class ExportTab(QWidget):
             self.log_text.appendPlainText(f"ZIP livraison: {batch.zip_path}")
         if batch.contact_sheet_path is not None:
             self.log_text.appendPlainText(f"Planche contact PDF: {batch.contact_sheet_path}")
+        self.on_job_event(
+            f"[Export] termine | exported={total_exported}, failed={total_failed}, profils={len(batch.profiles)}"
+        )
 
     def _on_export_error(self, message: str) -> None:
+        self.on_job_event(f"[Export] Erreur: {message}")
         QMessageBox.critical(self, "Erreur export", message)
 
     def _on_export_finished(self) -> None:
@@ -1132,6 +1668,7 @@ class ExportTab(QWidget):
         self.on_operation_ended()
         self._job_worker = None
         self._job_thread = None
+        self.on_job_event("[Export] Job termine.")
 
 
 class PresetTab(QWidget):
