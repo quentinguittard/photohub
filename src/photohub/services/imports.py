@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from ..models import Asset, ImportRun, Project
+from .metadata import build_asset_metadata_index, extract_embedded_metadata
 from .projects import try_transition_project_status
 from .presets import resolve_effective_config_for_project_model
 from ..utils import iter_media_files, sha256_file, unique_path
@@ -96,12 +98,21 @@ class ImportService:
                         backup_file = unique_path(backup_root / f"{target_name}{source_file.suffix.lower()}")
                         shutil.copy2(destination, backup_file)
 
+                    metadata_payload = extract_embedded_metadata(destination)
+                    metadata_index = build_asset_metadata_index(metadata_payload)
                     session.add(
                         Asset(
                             project_id=project.id,
                             src_path=str(destination),
                             hash_sha256=destination_hash,
-                            metadata_json="{}",
+                            exif_iso=metadata_index["exif_iso"],
+                            exif_lens=metadata_index["exif_lens"],
+                            exif_camera=metadata_index["exif_camera"],
+                            exif_shot_date=metadata_index["exif_shot_date"],
+                            iptc_keywords=metadata_index["iptc_keywords"],
+                            iptc_author=metadata_index["iptc_author"],
+                            iptc_copyright=metadata_index["iptc_copyright"],
+                            metadata_json=json.dumps(metadata_payload, ensure_ascii=True),
                         )
                     )
                     copied_count += 1

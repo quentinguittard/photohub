@@ -9,6 +9,7 @@ from ..config import (
     compute_app_data_dir_from_root,
     load_settings,
     normalize_accent_color,
+    normalize_studio_profile,
     resolve_app_paths,
     save_settings,
 )
@@ -37,6 +38,29 @@ class StorageService:
         normalized = normalize_accent_color(accent_color)
         settings = load_settings()
         settings["accent_color"] = normalized
+        save_settings(settings)
+        return normalized
+
+    def get_studio_profile(self) -> dict:
+        settings = load_settings()
+        return normalize_studio_profile(settings.get("studio_profile"))
+
+    def set_studio_profile(
+        self,
+        *,
+        studio_name: str,
+        photographer_name: str,
+        copyright_notice: str,
+    ) -> dict:
+        normalized = normalize_studio_profile(
+            {
+                "studio_name": studio_name,
+                "photographer_name": photographer_name,
+                "copyright_notice": copyright_notice,
+            }
+        )
+        settings = load_settings()
+        settings["studio_profile"] = normalized
         save_settings(settings)
         return normalized
 

@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from ..models import Client, Preset, PresetVersion, Project
 from ..preset_defaults import default_preset_config
+from .watermarks import normalize_watermark_config
 
 
 class PresetService:
@@ -190,6 +191,8 @@ def resolve_effective_config_for_project_model(session, project: Project) -> dic
 
     if project.preset is not None and project.preset.is_active:
         effective = _merge_with_preset_json(effective, project.preset.config_json)
+
+    effective["watermark"] = normalize_watermark_config(effective.get("watermark", {}))
 
     return effective
 

@@ -70,8 +70,14 @@ class PresetInheritanceTests(unittest.TestCase):
             self.assertEqual(effective["delivery"]["create_zip"], defaults["delivery"]["create_zip"])
             self.assertEqual(effective["delivery"]["create_report"], defaults["delivery"]["create_report"])
             self.assertEqual(effective["watermark"]["enabled"], defaults["watermark"]["enabled"])
-            self.assertEqual(effective["watermark"]["text"], defaults["watermark"]["text"])
-            self.assertEqual(effective["watermark"]["opacity"], defaults["watermark"]["opacity"])
+            self.assertEqual(
+                effective["watermark"]["text"]["template"],
+                defaults["watermark"]["text"]["template"],
+            )
+            self.assertEqual(
+                effective["watermark"]["text"]["opacity"],
+                defaults["watermark"]["text"]["opacity"],
+            )
 
             assigned = preset_service.create_preset(
                 name="ASSIGNED_LAST",
@@ -86,8 +92,8 @@ class PresetInheritanceTests(unittest.TestCase):
             self.assertFalse(effective_assigned["delivery"]["create_zip"])
             self.assertFalse(effective_assigned["delivery"]["create_report"])
             self.assertTrue(effective_assigned["watermark"]["enabled"])
-            self.assertEqual(effective_assigned["watermark"]["text"], "ASSIGNED")
-            self.assertEqual(effective_assigned["watermark"]["opacity"], 55)
+            self.assertEqual(effective_assigned["watermark"]["text"]["template"], "ASSIGNED")
+            self.assertEqual(effective_assigned["watermark"]["text"]["opacity"], 55)
 
             engine.dispose()
 

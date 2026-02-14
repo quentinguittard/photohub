@@ -8,7 +8,13 @@ from pathlib import Path
 
 
 APP_NAME = "PhotoHub"
-DEFAULT_ACCENT_COLOR = "#39FF14"
+DEFAULT_ACCENT_COLOR = "#10B981"
+LEGACY_DEFAULT_ACCENT_COLOR = "#39FF14"
+DEFAULT_STUDIO_PROFILE = {
+    "studio_name": "",
+    "photographer_name": "",
+    "copyright_notice": "",
+}
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,7 @@ def _default_settings() -> dict:
         "last_migration_status": "idle",
         "last_migration_error": None,
         "accent_color": DEFAULT_ACCENT_COLOR,
+        "studio_profile": dict(DEFAULT_STUDIO_PROFILE),
     }
 
 
@@ -85,13 +92,42 @@ def load_settings() -> dict:
         return defaults
 
     merged = {**defaults, **payload}
-    merged["storage_root"] = str(Path(str(merged["storage_root"])).expanduser())
-    merged["active_data_dir"] = str(Path(str(merged["active_data_dir"])).expanduser())
-    merged["accent_color"] = normalize_accent_color(merged.get("accent_color"))
+    changed = False
+
+    normalized_storage_root = str(Path(str(merged["storage_root"])).expanduser())
+    normalized_active_data_dir = str(Path(str(merged["active_data_dir"])).expanduser())
+    normalized_accent = normalize_accent_color(merged.get("accent_color"))
+    normalized_studio_profile = normalize_studio_profile(merged.get("studio_profile"))
+
+    if merged.get("storage_root") != normalized_storage_root:
+        changed = True
+    if merged.get("active_data_dir") != normalized_active_data_dir:
+        changed = True
+    if merged.get("accent_color") != normalized_accent:
+        changed = True
+    if merged.get("studio_profile") != normalized_studio_profile:
+        changed = True
+
+    merged["storage_root"] = normalized_storage_root
+    merged["active_data_dir"] = normalized_active_data_dir
+    merged["accent_color"] = normalized_accent
+    merged["studio_profile"] = normalized_studio_profile
+
+    # Migrate historical neon default to the new calmer default.
+    if str(merged.get("accent_color", "")).upper() == LEGACY_DEFAULT_ACCENT_COLOR:
+        merged["accent_color"] = DEFAULT_ACCENT_COLOR
+        changed = True
     if merged.get("last_migration_status") not in {"idle", "running", "failed", "completed"}:
         merged["last_migration_status"] = "idle"
+        changed = True
     if merged.get("last_migration_error") is not None:
-        merged["last_migration_error"] = str(merged["last_migration_error"])
+        normalized_error = str(merged["last_migration_error"])
+        if merged["last_migration_error"] != normalized_error:
+            changed = True
+        merged["last_migration_error"] = normalized_error
+
+    if changed:
+        save_settings(merged)
     return merged
 
 
@@ -99,6 +135,15 @@ def save_settings(settings: dict) -> None:
     path = settings_file_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def normalize_studio_profile(payload) -> dict:
+    source = payload if isinstance(payload, dict) else {}
+    return {
+        "studio_name": str(source.get("studio_name", "") or "").strip(),
+        "photographer_name": str(source.get("photographer_name", "") or "").strip(),
+        "copyright_notice": str(source.get("copyright_notice", "") or "").strip(),
+    }
 
 
 def resolve_app_paths() -> AppPaths:
@@ -111,6 +156,7 @@ def resolve_app_paths() -> AppPaths:
         "last_migration_status": settings.get("last_migration_status", "idle"),
         "last_migration_error": settings.get("last_migration_error"),
         "accent_color": normalize_accent_color(settings.get("accent_color")),
+        "studio_profile": normalize_studio_profile(settings.get("studio_profile")),
     }
     save_settings(normalized)
 

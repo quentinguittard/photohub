@@ -101,6 +101,7 @@ class EditService:
             metadata = self._read_metadata(asset)
             metadata["edit"] = payload
             asset.metadata_json = json.dumps(metadata, ensure_ascii=True)
+            asset.workflow_state = "edited"
 
             project = session.get(Project, asset.project_id)
             if project is not None:
@@ -151,6 +152,7 @@ class EditService:
                 metadata = self._read_metadata(asset)
                 metadata["edit"] = dict(source_settings)
                 asset.metadata_json = json.dumps(metadata, ensure_ascii=True)
+                asset.workflow_state = "edited"
                 updated += 1
 
                 if progress_cb is not None:

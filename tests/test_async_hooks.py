@@ -63,6 +63,7 @@ class AsyncHooksTests(unittest.TestCase):
             ex = ExportService(sf)
 
             project = ps.create_project("ExportCancel", date(2026, 2, 13))
+            ps.update_quality_check(project.id, {"enabled": False})
             raw = Path(project.root_path) / "raw"
             f1 = raw / "a.jpg"
             f2 = raw / "b.jpg"

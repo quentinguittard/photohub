@@ -33,6 +33,7 @@ class ExportFilterTests(unittest.TestCase):
                 paths=AppPaths(data_dir=base, db_path=db_path, projects_dir=projects_dir),
             )
             project = project_service.create_project("Shoot Export", date(2026, 2, 13))
+            project_service.update_quality_check(project.id, {"enabled": False})
 
             file_low = Path(project.root_path) / "raw" / "low.jpg"
             file_high = Path(project.root_path) / "raw" / "high.jpg"

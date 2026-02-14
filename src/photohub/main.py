@@ -12,8 +12,11 @@ from .services import (
     EditService,
     ExportService,
     ImportService,
+    JobQueueService,
+    MetadataService,
     PresetService,
     ProjectService,
+    RenameService,
     StorageService,
 )
 
@@ -29,6 +32,9 @@ class RuntimeBundle:
     edit_service: EditService
     import_service: ImportService
     export_service: ExportService
+    job_queue_service: JobQueueService
+    metadata_service: MetadataService
+    rename_service: RenameService
 
 
 def build_runtime() -> RuntimeBundle:
@@ -46,6 +52,9 @@ def build_runtime() -> RuntimeBundle:
         edit_service=EditService(session_factory=session_factory),
         import_service=ImportService(session_factory=session_factory),
         export_service=ExportService(session_factory=session_factory),
+        job_queue_service=JobQueueService(session_factory=session_factory),
+        metadata_service=MetadataService(session_factory=session_factory),
+        rename_service=RenameService(session_factory=session_factory),
     )
 
 
@@ -73,6 +82,9 @@ def main() -> int:
         edit_service=runtime.edit_service,
         import_service=runtime.import_service,
         export_service=runtime.export_service,
+        job_queue_service=runtime.job_queue_service,
+        metadata_service=runtime.metadata_service,
+        rename_service=runtime.rename_service,
         storage_service=storage_service,
         on_reload_runtime=reload_runtime,
     )

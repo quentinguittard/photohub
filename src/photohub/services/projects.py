@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date
 from pathlib import Path
 
@@ -8,6 +9,15 @@ from sqlalchemy.orm import selectinload
 
 from ..config import AppPaths
 from ..models import Client, Preset, Project
+from .quality_checks import (
+    assert_quality_for_export,
+    default_project_quality_config,
+    evaluate_quality,
+    load_project_quality_payload,
+    normalize_quality_config,
+    normalize_quality_validation,
+    validate_quality_manually,
+)
 from ..utils import slugify
 
 
@@ -152,6 +162,8 @@ class ProjectService:
                 shoot_date=shoot_date,
                 status="a_importer",
                 root_path=str(project_root),
+                quality_check_config_json=json.dumps(default_project_quality_config(), ensure_ascii=True),
+                quality_check_validation_json=json.dumps({}, ensure_ascii=True),
                 client_id=client_id,
                 preset_id=preset_id,
             )
@@ -198,6 +210,79 @@ class ProjectService:
                 raise ValueError(build_invalid_transition_message(current, clean_status))
             project.status = clean_status
             session.commit()
+
+    def get_quality_check(self, project_id: int, export_min_rating: int | None = None) -> dict:
+        with self.session_factory() as session:
+            project = session.get(Project, int(project_id))
+            if project is None:
+                raise ValueError("Projet introuvable.")
+            config, validation = load_project_quality_payload(project)
+            evaluation = evaluate_quality(
+                session=session,
+                project=project,
+                export_min_rating=export_min_rating,
+                config=config,
+                validation=validation,
+            )
+            payload = evaluation.to_dict()
+            payload.update(
+                {
+                    "project_id": int(project.id),
+                    "config": dict(config),
+                    "validation": dict(validation),
+                }
+            )
+            return payload
+
+    def update_quality_check(self, project_id: int, config: dict) -> dict:
+        with self.session_factory() as session:
+            project = session.get(Project, int(project_id))
+            if project is None:
+                raise ValueError("Projet introuvable.")
+            normalized_config = normalize_quality_config(config)
+            project.quality_check_config_json = json.dumps(normalized_config, ensure_ascii=True)
+            project.quality_check_validation_json = json.dumps({}, ensure_ascii=True)
+            session.commit()
+
+        return self.get_quality_check(project_id=int(project_id), export_min_rating=1)
+
+    def validate_quality_check(self, project_id: int) -> dict:
+        with self.session_factory() as session:
+            project = session.get(Project, int(project_id))
+            if project is None:
+                raise ValueError("Projet introuvable.")
+            config, _ = load_project_quality_payload(project)
+            validation = validate_quality_manually(session=session, project=project, config=config)
+            project.quality_check_validation_json = json.dumps(
+                normalize_quality_validation(validation),
+                ensure_ascii=True,
+            )
+            session.commit()
+
+        return self.get_quality_check(project_id=int(project_id), export_min_rating=1)
+
+    def assert_export_quality(self, project_id: int, export_min_rating: int) -> dict:
+        with self.session_factory() as session:
+            project = session.get(Project, int(project_id))
+            if project is None:
+                raise ValueError("Projet introuvable.")
+            config, validation = load_project_quality_payload(project)
+            evaluation = assert_quality_for_export(
+                session=session,
+                project=project,
+                export_min_rating=int(export_min_rating),
+                config=config,
+                validation=validation,
+            )
+            payload = evaluation.to_dict()
+            payload.update(
+                {
+                    "project_id": int(project.id),
+                    "config": dict(config),
+                    "validation": dict(validation),
+                }
+            )
+            return payload
 
     def _allocate_project_dir(self, base_name: str, base_dir: Path | None = None) -> Path:
         target_root = base_dir if base_dir is not None else self.paths.projects_dir
