@@ -62,6 +62,9 @@ from ..services import (
 from ..services.edits import DEFAULT_EDIT_SETTINGS
 from ..services.watermarks import normalize_watermark_config, summarize_watermark_config
 from .watermark_editor import WatermarkEditorDialog
+from .components import BentoCard, WorkflowStatusBar
+from .dashboard import DashboardTab
+from .projects import ProjectsTab
 
 FIF = None
 FluentPushButton = None
@@ -331,133 +334,7 @@ class ExportQueueItem:
     message: str = ""
 
 
-class DashboardTab(QWidget):
-    def __init__(self, project_service: ProjectService, get_active_jobs: Callable[[], int]) -> None:
-        super().__init__()
-        self.project_service = project_service
-        self.get_active_jobs = get_active_jobs
-
-        layout = QVBoxLayout(self)
-        title = QLabel("Dashboard Studio")
-        title.setObjectName("PageTitle")
-        layout.addWidget(title)
-
-        cards_row = QHBoxLayout()
-        self.total_projects_label = self._build_card(cards_row, "Projets", "0")
-        self.to_import_label = self._build_card(cards_row, "A importer", "0")
-        self.ready_label = self._build_card(cards_row, "Prets a livrer", "0")
-        self.jobs_label = self._build_card(cards_row, "Jobs actifs", "0")
-        layout.addLayout(cards_row)
-
-        recent_box = QGroupBox("Projets recents")
-        recent_layout = QVBoxLayout(recent_box)
-        self.recent_cards_area = QScrollArea()
-        self.recent_cards_area.setWidgetResizable(True)
-        self.recent_cards_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.recent_cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.recent_cards_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.recent_cards_content = QWidget()
-        self.recent_cards_layout = QVBoxLayout(self.recent_cards_content)
-        self.recent_cards_layout.setContentsMargins(4, 4, 4, 4)
-        self.recent_cards_layout.setSpacing(10)
-        self.recent_cards_area.setWidget(self.recent_cards_content)
-        recent_layout.addWidget(self.recent_cards_area)
-        layout.addWidget(recent_box, 1)
-
-    def refresh_data(self) -> None:
-        projects = self.project_service.list_projects()
-        total = len(projects)
-        to_import = len([p for p in projects if p.status == "a_importer"])
-        ready = len([p for p in projects if p.status == "pret_a_livrer"])
-        active_jobs = int(self.get_active_jobs())
-
-        self.total_projects_label.setText(str(total))
-        self.to_import_label.setText(str(to_import))
-        self.ready_label.setText(str(ready))
-        self.jobs_label.setText(str(active_jobs))
-
-        recent = projects[:10]
-        self._clear_recent_cards()
-        if not recent:
-            empty = QLabel("Aucun projet recent.")
-            empty.setObjectName("CardMuted")
-            self.recent_cards_layout.addWidget(empty)
-        else:
-            for project in recent:
-                self.recent_cards_layout.addWidget(self._build_recent_project_card(project))
-        self.recent_cards_layout.addStretch(1)
-
-    @staticmethod
-    def _build_card(parent_layout: QHBoxLayout, title: str, value: str) -> QLabel:
-        box = QGroupBox(title)
-        box.setObjectName("StatCard")
-        card_layout = QVBoxLayout(box)
-        value_label = QLabel(value)
-        value_label.setObjectName("StatValue")
-        card_layout.addWidget(value_label)
-        parent_layout.addWidget(box, 1)
-        return value_label
-
-    def _clear_recent_cards(self) -> None:
-        while self.recent_cards_layout.count():
-            item = self.recent_cards_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-    def _build_recent_project_card(self, project) -> QWidget:
-        card = QFrame()
-        card.setObjectName("DataCard")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(14, 12, 14, 12)
-        card_layout.setSpacing(10)
-
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(10)
-        title = QLabel(project.name)
-        title.setObjectName("CardTitle")
-        status_label = QLabel(self.project_service.get_status_label(project.status))
-        status_label.setObjectName("CardBadge")
-        status_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        toggle = QToolButton()
-        toggle.setProperty("cardToggle", "true")
-        toggle.setCheckable(True)
-        toggle.setChecked(False)
-        toggle.setArrowType(Qt.ArrowType.RightArrow)
-        toggle.setFixedSize(24, 24)
-        header.addWidget(title, 1)
-        header.addWidget(status_label)
-        header.addWidget(toggle)
-        card_layout.addLayout(header)
-
-        details = QWidget()
-        details.setObjectName("CardDetails")
-        details_layout = QFormLayout(details)
-        details_layout.setContentsMargins(0, 10, 0, 0)
-        details_layout.setVerticalSpacing(6)
-        details_layout.setHorizontalSpacing(10)
-        details_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        details_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        details_layout.addRow("Client", self._card_value(project.client.name if project.client else "-"))
-        details_layout.addRow("Date", self._card_value(project.shoot_date.strftime("%Y-%m-%d")))
-        details_layout.addRow("Dossier", self._card_value(project.root_path))
-        details.setVisible(False)
-        card_layout.addWidget(details)
-
-        def _on_toggle(expanded: bool, panel=details, btn=toggle):
-            panel.setVisible(expanded)
-            btn.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-
-        toggle.toggled.connect(_on_toggle)
-        return card
-
-    @staticmethod
-    def _card_value(value: str) -> QLabel:
-        label = QLabel(str(value))
-        label.setWordWrap(True)
-        label.setObjectName("CardValue")
-        return label
+# DashboardTab moved to .dashboard.py
 
 
 class JobsTab(QWidget):
@@ -518,12 +395,9 @@ class MainWindow(QMainWindow):
         "dashboard": ("Dashboard", "Vue globale du studio"),
         "projects": ("Projets", "Creation, statut, et affectation preset"),
         "ingest": ("Ingest", "Importer les RAW vers le projet actif"),
-        "culling": (
-            "Tri rapide",
-            "Raccourcis: <-/-> (ou molette) | P garder | X rejeter | 1..5 noter | I infos chemin | B batch | F focus",
-        ),
+        "culling": ("Tri rapide", "Raccourcis: <-/-> | molette | P garder | X rejeter | 1..5 noter"),
         "rename": ("Batch rename", "Renommage par lot de la selection active"),
-        "edit": ("Edit rapide", "Raccourcis: Ctrl+C copier | Ctrl+V coller | Shift+S sync | Y avant/apres"),
+        "edit": ("Edit rapide", "Raccourcis: Ctrl+C copier | Ctrl+V coller | Shift+S sync | F solo mode"),
         "export": ("Export", "Batch multi-profils et livraison"),
         "presets": ("Presets", "Templates d'import/export/watermark"),
         "settings": ("Settings", "Stockage global et theme"),
@@ -566,9 +440,12 @@ class MainWindow(QMainWindow):
         self.resize(1400, 860)
 
         root = QWidget()
-        root_layout = QHBoxLayout(root)
+        root_layout = QGridLayout(root)
         root_layout.setContentsMargins(12, 12, 12, 12)
         root_layout.setSpacing(10)
+        root_layout.setColumnStretch(0, 0)
+        root_layout.setColumnStretch(1, 1)
+        root_layout.setRowStretch(0, 1)
 
         self.current_nav_key = ""
         self.sidebar_pinned = False
@@ -579,6 +456,7 @@ class MainWindow(QMainWindow):
         self.nav_panel = QWidget()
         self.nav_panel.setObjectName("SideBar")
         self.nav_panel.setFixedWidth(self.SIDEBAR_COLLAPSED_WIDTH)
+        self.nav_panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.nav_panel.installEventFilter(self)
         nav_layout = QVBoxLayout(self.nav_panel)
         nav_layout.setContentsMargins(10, 10, 10, 10)
@@ -598,70 +476,88 @@ class MainWindow(QMainWindow):
             self.nav_buttons[key] = button
             nav_layout.addWidget(button)
 
-        root_layout.addWidget(self.nav_panel)
+        root_layout.addWidget(self.nav_panel, 0, 0)
 
         content = QWidget()
+        content.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(0, 0, 0, 0)
         content_layout.setSpacing(10)
 
         topbar = QGroupBox()
         topbar.setObjectName("TopBar")
-        topbar.setFixedHeight(70)
+        topbar.setFixedHeight(74)
         topbar_layout = QHBoxLayout(topbar)
-        topbar_layout.setContentsMargins(14, 12, 14, 12)
+        topbar_layout.setContentsMargins(14, 10, 14, 10)
 
         app_title = QLabel("PhotoHub")
         app_title.setObjectName("AppTitle")
-        self.search_edit = self._build_search_line_edit()
-        self.search_edit.setPlaceholderText("Recherche projet (nom, client, statut)")
-        self.search_edit.setMaximumWidth(460)
-        self.search_edit.setMinimumHeight(34)
-        self.search_edit.textChanged.connect(self._on_search_text_changed)
-
         self.project_context_combo = QComboBox()
         self.project_context_combo.setMinimumHeight(34)
         self.project_context_combo.currentIndexChanged.connect(self._on_project_context_changed)
-        self.activity_badge = QLabel("Aucun job")
-        self.activity_badge.setObjectName("ActivityBadge")
-        self.activity_badge.setMinimumHeight(32)
-        self.context_mode_label = QLabel("Mode Dashboard")
+        self.context_mode_label = QLabel("Dashboard")
         self.context_mode_label.setObjectName("ContextModeBadge")
         self.context_mode_label.setMinimumHeight(32)
-        self.context_hint_label = QLabel("")
-        self.context_hint_label.setObjectName("ContextHintLabel")
-        self.context_hint_label.setWordWrap(False)
-        self.context_hint_label.setVisible(False)
+
+        # Workflow Status Bar (Fil Rouge)
+        self.workflow_status = WorkflowStatusBar()
+        self.workflow_status.step_clicked.connect(self._switch_page)
 
         topbar_layout.addWidget(app_title)
-        topbar_layout.addSpacing(8)
-        topbar_layout.addWidget(self.search_edit, 1)
-        topbar_layout.addWidget(QLabel("Projet actif"))
-        topbar_layout.addWidget(self.project_context_combo)
-        topbar_layout.addSpacing(6)
+        topbar_layout.addSpacing(16)
+        topbar_layout.addWidget(self.workflow_status)
+        topbar_layout.addStretch(1)
         topbar_layout.addWidget(self.context_mode_label)
-        topbar_layout.addWidget(self.context_hint_label, 1)
-        topbar_layout.addWidget(self.activity_badge)
+        topbar_layout.addSpacing(16)
+        topbar_layout.addWidget(QLabel("Projet"))
+        topbar_layout.addWidget(self.project_context_combo)
         content_layout.addWidget(topbar)
 
         self.stack = QStackedWidget()
-        self.dashboard_tab = DashboardTab(self.project_service, get_active_jobs=self._get_active_jobs_count)
-        self.hub_tab = HubTab(self.project_service, self.preset_service, on_data_changed=self.refresh_all)
-        self.import_export_tab = ImportExportTab(
-            project_service=self.project_service,
-            preset_service=self.preset_service,
-            culling_service=self.culling_service,
-            edit_service=self.edit_service,
-            metadata_service=self.metadata_service,
-            import_service=self.import_service,
-            export_service=self.export_service,
+        self.stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.dashboard_tab = DashboardTab(
+            self.project_service, 
+            get_active_jobs=self._get_active_jobs_count,
+            storage_service=self.storage_service,
             job_queue_service=self.job_queue_service,
+            on_navigate=self._switch_page
+        )
+        self.hub_tab = ProjectsTab(self.project_service, self.preset_service, on_data_changed=self.refresh_all)
+        self.import_tab = ImportTab(
+            project_service=self.project_service,
+            import_service=self.import_service,
             on_data_changed=self.refresh_all,
             on_operation_started=self._on_operation_started,
             on_operation_ended=self._on_operation_ended,
             on_job_event=self._append_job_event,
         )
-        self.import_export_tab.sections.currentChanged.connect(self._on_import_export_section_changed)
+        self.culling_tab = CullingTab(
+            project_service=self.project_service,
+            culling_service=self.culling_service,
+            on_data_changed=self.refresh_all,
+            on_operation_started=self._on_operation_started,
+            on_operation_ended=self._on_operation_ended,
+            on_job_event=self._append_job_event,
+        )
+        self.edit_tab = EditTab(
+            project_service=self.project_service,
+            edit_service=self.edit_service,
+            metadata_service=self.metadata_service,
+            on_operation_started=self._on_operation_started,
+            on_operation_ended=self._on_operation_ended,
+            on_job_event=self._append_job_event,
+        )
+        # Prevent Edit minimum size hint from forcing window growth when sidebar expands.
+        self.edit_tab.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+        self.export_tab = ExportTab(
+            project_service=self.project_service,
+            preset_service=self.preset_service,
+            export_service=self.export_service,
+            job_queue_service=self.job_queue_service,
+            on_operation_started=self._on_operation_started,
+            on_operation_ended=self._on_operation_ended,
+            on_job_event=self._append_job_event,
+        )
         self.rename_tab = BatchRenameTab(
             project_service=self.project_service,
             culling_service=self.culling_service,
@@ -682,16 +578,17 @@ class MainWindow(QMainWindow):
 
         self.stack.addWidget(self.dashboard_tab)
         self.stack.addWidget(self.hub_tab)
-        self.stack.addWidget(self.import_export_tab)
+        self.stack.addWidget(self.import_tab)
+        self.stack.addWidget(self.culling_tab)
+        self.stack.addWidget(self.edit_tab)
+        self.stack.addWidget(self.export_tab)
         self.stack.addWidget(self.rename_tab)
         self.stack.addWidget(self.presets_tab)
         self.stack.addWidget(self.settings_tab)
         self.stack.addWidget(self.jobs_tab)
         content_layout.addWidget(self.stack, 1)
-        root_layout.addWidget(content, 1)
+        root_layout.addWidget(content, 0, 1)
         self.setCentralWidget(root)
-        self.search_shortcut = QShortcut(QKeySequence("Ctrl+K"), self)
-        self.search_shortcut.activated.connect(self._focus_global_search)
 
         self._apply_theme()
         self._apply_sidebar_state()
@@ -700,8 +597,7 @@ class MainWindow(QMainWindow):
         self.refresh_all()
 
     def _focus_global_search(self) -> None:
-        self.search_edit.setFocus()
-        self.search_edit.selectAll()
+        return
 
     def _get_active_jobs_count(self) -> int:
         return int(self.active_ops_count)
@@ -711,12 +607,10 @@ class MainWindow(QMainWindow):
 
     def _on_operation_started(self) -> None:
         self.active_ops_count += 1
-        self._update_activity_badge()
         self.jobs_tab.refresh_data()
 
     def _on_operation_ended(self) -> None:
         self.active_ops_count = max(0, self.active_ops_count - 1)
-        self._update_activity_badge()
         self.jobs_tab.refresh_data()
 
     def _append_job_event(self, message: str) -> None:
@@ -804,11 +698,11 @@ class MainWindow(QMainWindow):
 
     def _restore_layout_after_sidebar_toggle(self) -> None:
         try:
-            self.import_export_tab.culling_tab.reset_layout_after_shell_resize()
+            self.culling_tab.reset_layout_after_shell_resize()
         except Exception:
             pass
         try:
-            self.import_export_tab.edit_tab.reset_layout_after_shell_resize()
+            self.edit_tab.reset_layout_after_shell_resize()
         except Exception:
             pass
         try:
@@ -913,25 +807,25 @@ class MainWindow(QMainWindow):
         if not normalized:
             return
         self._set_active_nav(normalized)
+        
+        # Sync WorkflowStatusBar
+        if hasattr(self, "workflow_status"):
+             self.workflow_status.set_active_step(normalized)
 
         if normalized == "dashboard":
             self.stack.setCurrentWidget(self.dashboard_tab)
         elif normalized == "projects":
             self.stack.setCurrentWidget(self.hub_tab)
         elif normalized == "ingest":
-            self.stack.setCurrentWidget(self.import_export_tab)
-            self.import_export_tab.set_current_section("import")
+            self.stack.setCurrentWidget(self.import_tab)
         elif normalized == "culling":
-            self.stack.setCurrentWidget(self.import_export_tab)
-            self.import_export_tab.set_current_section("culling")
+            self.stack.setCurrentWidget(self.culling_tab)
         elif normalized == "rename":
             self.stack.setCurrentWidget(self.rename_tab)
         elif normalized == "edit":
-            self.stack.setCurrentWidget(self.import_export_tab)
-            self.import_export_tab.set_current_section("edit")
+            self.stack.setCurrentWidget(self.edit_tab)
         elif normalized == "export":
-            self.stack.setCurrentWidget(self.import_export_tab)
-            self.import_export_tab.set_current_section("export")
+            self.stack.setCurrentWidget(self.export_tab)
         elif normalized == "presets":
             self.stack.setCurrentWidget(self.presets_tab)
         elif normalized == "settings":
@@ -952,24 +846,16 @@ class MainWindow(QMainWindow):
             button.update()
 
     def _on_import_export_section_changed(self, index: int) -> None:
-        if self.stack.currentWidget() is not self.import_export_tab:
-            return
-        section_map = {0: "ingest", 1: "culling", 2: "edit", 3: "export"}
-        nav_key = section_map.get(int(index), "ingest")
-        self._set_active_nav(nav_key)
-        self._update_context_bar(nav_key)
+        # Kept for backward compatibility after moving to page-level sidebar navigation.
+        _ = index
 
     def _update_context_bar(self, key: str) -> None:
         mode, hint = self.CONTEXT_HINTS.get((key or "").strip().lower(), ("Mode", ""))
         self.context_mode_label.setText(mode)
-        self.context_hint_label.setText(hint)
+        self.context_mode_label.setToolTip(hint)
 
     def _update_activity_badge(self) -> None:
-        active = self._get_active_jobs_count()
-        if active <= 0:
-            self.activity_badge.setText("Aucun job")
-            return
-        self.activity_badge.setText(f"{active} job(s)")
+        return
 
     def _refresh_project_context_combo(self) -> None:
         current = self.project_context_combo.currentData()
@@ -995,7 +881,10 @@ class MainWindow(QMainWindow):
         project_id = self.project_context_combo.currentData()
         if project_id is None:
             return
-        self.import_export_tab.set_selected_project(int(project_id))
+        self.import_tab.set_selected_project(int(project_id))
+        self.culling_tab.set_selected_project(int(project_id))
+        self.edit_tab.set_selected_project(int(project_id))
+        self.export_tab.set_selected_project(int(project_id))
         self.hub_tab.select_project_by_id(int(project_id))
         self.rename_tab.set_selected_project(int(project_id))
 
@@ -1020,17 +909,17 @@ class MainWindow(QMainWindow):
         self.rename_tab.project_service = self.project_service
         self.rename_tab.culling_service = self.culling_service
         self.rename_tab.rename_service = self.rename_service
-        self.import_export_tab.import_tab.project_service = self.project_service
-        self.import_export_tab.import_tab.import_service = self.import_service
-        self.import_export_tab.culling_tab.project_service = self.project_service
-        self.import_export_tab.culling_tab.culling_service = self.culling_service
-        self.import_export_tab.edit_tab.project_service = self.project_service
-        self.import_export_tab.edit_tab.edit_service = self.edit_service
-        self.import_export_tab.edit_tab.metadata_service = self.metadata_service
-        self.import_export_tab.export_tab.project_service = self.project_service
-        self.import_export_tab.export_tab.preset_service = self.preset_service
-        self.import_export_tab.export_tab.export_service = self.export_service
-        self.import_export_tab.export_tab.job_queue_service = self.job_queue_service
+        self.import_tab.project_service = self.project_service
+        self.import_tab.import_service = self.import_service
+        self.culling_tab.project_service = self.project_service
+        self.culling_tab.culling_service = self.culling_service
+        self.edit_tab.project_service = self.project_service
+        self.edit_tab.edit_service = self.edit_service
+        self.edit_tab.metadata_service = self.metadata_service
+        self.export_tab.project_service = self.project_service
+        self.export_tab.preset_service = self.preset_service
+        self.export_tab.export_service = self.export_service
+        self.export_tab.job_queue_service = self.job_queue_service
         self.presets_tab.preset_service = self.preset_service
         self._append_job_event("Migration stockage terminee et runtime recharge.")
         self.refresh_all()
@@ -1038,7 +927,10 @@ class MainWindow(QMainWindow):
     def refresh_all(self) -> None:
         self.dashboard_tab.refresh_data()
         self.hub_tab.refresh_data()
-        self.import_export_tab.refresh_data()
+        self.import_tab.refresh_data()
+        self.culling_tab.refresh_data()
+        self.edit_tab.refresh_data()
+        self.export_tab.refresh_data()
         self.rename_tab.refresh_data()
         self.presets_tab.refresh_data()
         self.settings_tab.refresh_data()
@@ -1387,6 +1279,48 @@ class MainWindow(QMainWindow):
                 background: %(bg_card)s;
                 padding-top: 6px;
             }
+            
+            /* Bento Card & Layout Components */
+            QFrame#BentoCard {
+                background: %(bg_card)s;
+                border: 1px solid %(border_subtle)s;
+                border-radius: 16px; 
+            }
+            QLabel#BentoCardTitle {
+                font-size: 14px;
+                font-weight: 700;
+                color: %(text_secondary)s;
+                padding-left: 2px;
+            }
+            QWidget#BentoCardContent {
+                background: transparent;
+            }
+
+            /* Workflow Status Bar */
+            QFrame#WorkflowStatusBar {
+                border-radius: 18px;
+                background: %(bg_panel)s;
+                border: 1px solid %(border_subtle)s;
+            }
+            QPushButton#WorkflowStepButton {
+                border: none;
+                background: transparent;
+                color: %(text_secondary)s;
+                font-weight: 600;
+                border-radius: 14px;
+                padding: 6px 14px;
+                font-size: 12px;
+            }
+            QPushButton#WorkflowStepButton:hover {
+                color: %(text_primary)s;
+                background: %(bg_hover)s;
+            }
+            QPushButton#WorkflowStepButton[active="true"] {
+                color: %(text_primary)s;
+                background: %(accent_subtle_soft)s;
+                border: 1px solid %(accent_subtle_hover)s;
+            }
+
             QGroupBox#EditParamGroup::title, QGroupBox#EditActionGroup::title {
                 left: 12px;
                 padding: 0 2px;
@@ -1460,6 +1394,22 @@ class MainWindow(QMainWindow):
                 border-color: %(accent_subtle_hover)s;
                 background: %(bg_hover)s;
             }
+            QToolButton#IngestBentoButton {
+                border: 1px solid %(border_subtle)s;
+                border-radius: 10px;
+                background: %(bg_card)s;
+                color: %(text_primary)s;
+                font-weight: 600;
+                padding: 8px 6px;
+            }
+            QToolButton#IngestBentoButton:hover {
+                border-color: %(accent_subtle_hover)s;
+                background: %(bg_hover)s;
+            }
+            QToolButton#IngestBentoButton:pressed {
+                border-color: %(accent_subtle_pressed)s;
+                background: %(bg_panel)s;
+            }
             QScrollArea {
                 border: none;
                 background: transparent;
@@ -1467,11 +1417,22 @@ class MainWindow(QMainWindow):
             QScrollArea > QWidget > QWidget {
                 background: transparent;
             }
+            /* Global Scrollbar Policy: Hidden by default or very minimal */
             QScrollBar:vertical {
                 background: transparent;
-                width: 12px;
-                margin: 4px 2px 4px 2px;
+                width: 0px; /* Hidden by default per req, specific widgets override this later if needed */
+                margin: 0px;
                 border: none;
+            }
+            QScrollBar::handle:vertical {
+                background: %(scrollbar_handle)s;
+                min-height: 44px;
+                border-radius: 4px;
+                margin: 0 2px 0 2px;
+            }
+            /* Only show minimal width when explicit classes request it */
+            QPlainTextEdit > QScrollBar:vertical, QTableWidget > QScrollBar:vertical, QScrollArea[minimalScroll="true"] > QScrollBar:vertical {
+                width: 8px;
             }
             QScrollBar::handle:vertical {
                 background: %(scrollbar_handle)s;
@@ -1665,525 +1626,7 @@ class MainWindow(QMainWindow):
         )
 
 
-class HubTab(QWidget):
-    def __init__(self, project_service: ProjectService, preset_service: PresetService, on_data_changed) -> None:
-        super().__init__()
-        self.project_service = project_service
-        self.preset_service = preset_service
-        self.on_data_changed = on_data_changed
-        self._name_filter = ""
-
-        layout = QVBoxLayout(self)
-
-        creator_box = QGroupBox("Nouveau Projet")
-        creator_layout = QGridLayout(creator_box)
-
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("Nom du projet")
-        self.client_edit = QLineEdit()
-        self.client_edit.setPlaceholderText("Nom client (optionnel)")
-
-        self.date_edit = QDateEdit()
-        self.date_edit.setCalendarPopup(True)
-        self.date_edit.setDate(QDate.currentDate())
-
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItem("Aucun preset", userData=None)
-
-        self.custom_location_check = QCheckBox("Emplacement personnalise pour ce projet")
-        self.custom_location_check.toggled.connect(self._toggle_custom_location)
-
-        custom_row = QHBoxLayout()
-        self.custom_location_edit = QLineEdit()
-        self.custom_location_edit.setPlaceholderText("Dossier parent du projet")
-        self.custom_location_edit.setEnabled(False)
-        custom_browse_btn = _new_button("Parcourir")
-        custom_browse_btn.setEnabled(False)
-        custom_browse_btn.clicked.connect(self._pick_custom_location)
-        self.custom_location_browse_btn = custom_browse_btn
-        custom_row.addWidget(self.custom_location_edit)
-        custom_row.addWidget(custom_browse_btn)
-
-        self.create_btn = _new_button("Creer Projet", primary=True)
-        self.create_btn.clicked.connect(self._create_project)
-
-        creator_layout.addWidget(QLabel("Nom"), 0, 0)
-        creator_layout.addWidget(self.name_edit, 0, 1)
-        creator_layout.addWidget(QLabel("Client"), 0, 2)
-        creator_layout.addWidget(self.client_edit, 0, 3)
-        creator_layout.addWidget(QLabel("Date shooting"), 1, 0)
-        creator_layout.addWidget(self.date_edit, 1, 1)
-        creator_layout.addWidget(QLabel("Preset"), 1, 2)
-        creator_layout.addWidget(self.preset_combo, 1, 3)
-        creator_layout.addWidget(self.create_btn, 2, 3)
-        creator_layout.addWidget(self.custom_location_check, 3, 0, 1, 4)
-        creator_layout.addLayout(custom_row, 4, 0, 1, 4)
-
-        layout.addWidget(creator_box)
-
-        assign_box = QGroupBox("Affectation Preset")
-        assign_layout = QHBoxLayout(assign_box)
-        self.assign_combo = QComboBox()
-        self.assign_combo.addItem("Aucun preset", userData=None)
-        self.assign_btn = _new_button("Affecter au projet selectionne")
-        self.assign_btn.clicked.connect(self._assign_selected_project)
-        assign_layout.addWidget(QLabel("Preset"))
-        assign_layout.addWidget(self.assign_combo)
-        assign_layout.addWidget(self.assign_btn)
-        layout.addWidget(assign_box)
-
-        status_box = QGroupBox("Statut Projet")
-        status_layout = QHBoxLayout(status_box)
-        self.status_combo = QComboBox()
-        for code, label in self.project_service.list_status_choices():
-            self.status_combo.addItem(label, userData=code)
-        self.status_btn = _new_button("Mettre a jour le statut")
-        self.status_btn.clicked.connect(self._update_selected_project_status)
-        status_layout.addWidget(QLabel("Statut"))
-        status_layout.addWidget(self.status_combo)
-        status_layout.addWidget(self.status_btn)
-        layout.addWidget(status_box)
-
-        quality_box = QGroupBox("Checklist qualite export")
-        quality_layout = QGridLayout(quality_box)
-        quality_layout.setHorizontalSpacing(12)
-        quality_layout.setVerticalSpacing(8)
-
-        self.quality_enabled_check = QCheckBox("Activer checklist qualite")
-        self.quality_rule_min_rating_check = QCheckBox("Exiger note min export > 0")
-        self.quality_rule_metadata_check = QCheckBox("Exiger metadata Author + Copyright")
-        self.quality_rule_watermark_check = QCheckBox("Exiger watermark actif")
-        self.quality_rule_watermark_check.setToolTip("Optionnel: bloque l'export si le watermark preset est desactive.")
-
-        self.quality_save_btn = _new_button("Enregistrer checklist")
-        self.quality_save_btn.clicked.connect(self._save_quality_check)
-        self.quality_validate_btn = _new_button("Valider checklist", primary=True)
-        self.quality_validate_btn.clicked.connect(self._validate_quality_check)
-        self.quality_details_btn = _new_button("Voir details")
-        self.quality_details_btn.clicked.connect(self._show_quality_details)
-
-        self.quality_state_label = QLabel("Etat: -")
-        self.quality_state_label.setObjectName("CardValue")
-        self.quality_validated_label = QLabel("Validation: -")
-        self.quality_validated_label.setObjectName("CardMuted")
-        self.quality_summary_label = QLabel("Resume: -")
-        self.quality_summary_label.setWordWrap(True)
-        self.quality_summary_label.setObjectName("CardMuted")
-
-        quality_btn_row = QHBoxLayout()
-        quality_btn_row.setSpacing(8)
-        quality_btn_row.addWidget(self.quality_save_btn)
-        quality_btn_row.addWidget(self.quality_validate_btn)
-        quality_btn_row.addWidget(self.quality_details_btn)
-        quality_btn_row.addStretch(1)
-
-        quality_layout.addWidget(self.quality_enabled_check, 0, 0, 1, 2)
-        quality_layout.addWidget(self.quality_rule_min_rating_check, 1, 0)
-        quality_layout.addWidget(self.quality_rule_metadata_check, 1, 1)
-        quality_layout.addWidget(self.quality_rule_watermark_check, 2, 0, 1, 2)
-        quality_layout.addLayout(quality_btn_row, 3, 0, 1, 2)
-        quality_layout.addWidget(self.quality_state_label, 4, 0, 1, 2)
-        quality_layout.addWidget(self.quality_validated_label, 5, 0, 1, 2)
-        quality_layout.addWidget(self.quality_summary_label, 6, 0, 1, 2)
-        layout.addWidget(quality_box)
-
-        self.current_project_id: int | None = None
-        self.expanded_project_ids: set[int] = set()
-        projects_box = QGroupBox("Projets")
-        projects_box_layout = QVBoxLayout(projects_box)
-        self.project_cards_area = QScrollArea()
-        self.project_cards_area.setWidgetResizable(True)
-        self.project_cards_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.project_cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.project_cards_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.project_cards_content = QWidget()
-        self.project_cards_layout = QVBoxLayout(self.project_cards_content)
-        self.project_cards_layout.setContentsMargins(4, 4, 4, 4)
-        self.project_cards_layout.setSpacing(10)
-        self.project_cards_area.setWidget(self.project_cards_content)
-        projects_box_layout.addWidget(self.project_cards_area)
-        layout.addWidget(projects_box, 1)
-
-    def refresh_data(self) -> None:
-        selected_project_id = self._selected_project_id()
-        presets = self.preset_service.list_presets()
-        self.preset_combo.blockSignals(True)
-        self.assign_combo.blockSignals(True)
-        self.preset_combo.clear()
-        self.assign_combo.clear()
-        self.preset_combo.addItem("Aucun preset", userData=None)
-        self.assign_combo.addItem("Aucun preset", userData=None)
-        for preset in presets:
-            self.preset_combo.addItem(preset.name, userData=preset.id)
-            self.assign_combo.addItem(preset.name, userData=preset.id)
-        self.preset_combo.blockSignals(False)
-        self.assign_combo.blockSignals(False)
-
-        projects = self.project_service.list_projects()
-        filtered_projects = projects
-        if self._name_filter:
-            term = self._name_filter.lower()
-            filtered_projects = [
-                project
-                for project in projects
-                if term
-                in " ".join(
-                    [
-                        project.name,
-                        project.client.name if project.client else "",
-                        self.project_service.get_status_label(project.status),
-                    ]
-                ).lower()
-            ]
-        visible_ids = {project.id for project in filtered_projects}
-        if selected_project_id not in visible_ids:
-            selected_project_id = filtered_projects[0].id if filtered_projects else None
-            self.current_project_id = selected_project_id
-
-        self._render_project_cards(filtered_projects)
-        self._sync_controls_with_selected_project()
-
-    def set_name_filter(self, value: str) -> None:
-        self._name_filter = value.strip()
-        self.refresh_data()
-
-    def select_project_by_id(self, project_id: int) -> None:
-        self.current_project_id = int(project_id)
-        self.refresh_data()
-
-    def _selected_project_id(self) -> int | None:
-        return self.current_project_id
-
-    def _clear_project_cards(self) -> None:
-        while self.project_cards_layout.count():
-            item = self.project_cards_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-    def _render_project_cards(self, projects: list) -> None:
-        self._clear_project_cards()
-        if not projects:
-            empty = QLabel("Aucun projet pour ce filtre.")
-            empty.setObjectName("CardMuted")
-            self.project_cards_layout.addWidget(empty)
-            self.project_cards_layout.addStretch(1)
-            return
-
-        for project in projects:
-            is_selected = self.current_project_id is not None and int(project.id) == int(self.current_project_id)
-            card = self._build_project_card(project, is_selected=is_selected)
-            self.project_cards_layout.addWidget(card)
-        self.project_cards_layout.addStretch(1)
-
-    def _build_project_card(self, project, is_selected: bool) -> QWidget:
-        card = QFrame()
-        card.setObjectName("DataCard")
-        card.setProperty("selected", "true" if is_selected else "false")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(14, 12, 14, 12)
-        card_layout.setSpacing(10)
-
-        header = QHBoxLayout()
-        header.setContentsMargins(0, 0, 0, 0)
-        header.setSpacing(10)
-        select_btn = NativePushButton(f"{project.id} - {project.name}")
-        select_btn.setProperty("cardSelect", "true")
-        select_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        select_btn.setMinimumHeight(32)
-        select_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        select_btn.clicked.connect(lambda _checked=False, pid=project.id: self._on_project_card_selected(pid))
-        badge = QLabel(self.project_service.get_status_label(project.status))
-        badge.setObjectName("CardBadge")
-        badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-
-        toggle = QToolButton()
-        toggle.setProperty("cardToggle", "true")
-        toggle.setCheckable(True)
-        expanded = bool(is_selected or (project.id in self.expanded_project_ids))
-        toggle.setChecked(expanded)
-        toggle.setArrowType(Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow)
-        toggle.setFixedSize(24, 24)
-
-        header.addWidget(select_btn, 1)
-        header.addWidget(badge)
-        header.addWidget(toggle)
-        card_layout.addLayout(header)
-
-        details = QWidget()
-        details.setObjectName("CardDetails")
-        details_layout = QFormLayout(details)
-        details_layout.setContentsMargins(0, 10, 0, 0)
-        details_layout.setHorizontalSpacing(10)
-        details_layout.setVerticalSpacing(6)
-        details_layout.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        details_layout.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
-        details_layout.addRow("Client", self._card_value(project.client.name if project.client else "-"))
-        details_layout.addRow("Date", self._card_value(project.shoot_date.strftime("%Y-%m-%d")))
-        details_layout.addRow("Preset", self._card_value(project.preset.name if project.preset else "-"))
-        details_layout.addRow("Dossier", self._card_value(project.root_path))
-        details.setVisible(expanded)
-        card_layout.addWidget(details)
-
-        def _on_toggle(opened: bool, pid=project.id, panel=details, btn=toggle):
-            panel.setVisible(opened)
-            btn.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
-            if opened:
-                self.expanded_project_ids.add(pid)
-            else:
-                self.expanded_project_ids.discard(pid)
-
-        toggle.toggled.connect(_on_toggle)
-        return card
-
-    @staticmethod
-    def _card_value(value: str) -> QLabel:
-        label = QLabel(str(value))
-        label.setWordWrap(True)
-        label.setObjectName("CardValue")
-        return label
-
-    def _on_project_card_selected(self, project_id: int) -> None:
-        self.current_project_id = int(project_id)
-        self.refresh_data()
-
-    def _toggle_custom_location(self, enabled: bool) -> None:
-        self.custom_location_edit.setEnabled(enabled)
-        self.custom_location_browse_btn.setEnabled(enabled)
-
-    def _pick_custom_location(self) -> None:
-        directory = QFileDialog.getExistingDirectory(self, "Choisir dossier parent")
-        if directory:
-            self.custom_location_edit.setText(directory)
-
-    def _create_project(self) -> None:
-        name = self.name_edit.text().strip()
-        if not name:
-            QMessageBox.warning(self, "Validation", "Le nom du projet est obligatoire.")
-            return
-
-        preset_id = self.preset_combo.currentData()
-        shoot_date = self.date_edit.date().toPython()
-        client_name = self.client_edit.text().strip() or None
-        custom_root = None
-        if self.custom_location_check.isChecked():
-            custom_root = self.custom_location_edit.text().strip()
-            if not custom_root:
-                QMessageBox.warning(self, "Validation", "Selectionne un dossier personnalise.")
-                return
-
-        try:
-            self.project_service.create_project(
-                name=name,
-                shoot_date=shoot_date,
-                preset_id=preset_id,
-                custom_root_path=custom_root,
-                client_name=client_name,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Erreur creation projet", str(exc))
-            return
-
-        self.name_edit.clear()
-        self.client_edit.clear()
-        if self.custom_location_check.isChecked():
-            self.custom_location_edit.clear()
-        self.on_data_changed()
-
-    def _assign_selected_project(self) -> None:
-        project_id = self._selected_project_id()
-        if project_id is None:
-            QMessageBox.warning(self, "Selection", "Selectionne un projet dans la liste.")
-            return
-        preset_id = self.assign_combo.currentData()
-        try:
-            self.project_service.assign_preset(project_id, preset_id)
-        except Exception as exc:
-            QMessageBox.critical(self, "Erreur preset", str(exc))
-            return
-        self.on_data_changed()
-
-    def _update_selected_project_status(self) -> None:
-        project_id = self._selected_project_id()
-        if project_id is None:
-            QMessageBox.warning(self, "Selection", "Selectionne un projet dans la liste.")
-            return
-        status = self.status_combo.currentData()
-        if status is None:
-            QMessageBox.warning(self, "Validation", "Selectionne un statut valide.")
-            return
-
-        try:
-            self.project_service.update_project_status(project_id=project_id, status=str(status))
-        except Exception as exc:
-            QMessageBox.critical(self, "Erreur statut", str(exc))
-            return
-        self.on_data_changed()
-
-    def _sync_controls_with_selected_project(self) -> None:
-        project_id = self._selected_project_id()
-        if project_id is None:
-            self._set_quality_snapshot(None)
-            return
-        project = self.project_service.get_project(project_id)
-        if project is None:
-            self._set_quality_snapshot(None)
-            return
-
-        status_idx = self.status_combo.findData(project.status)
-        if status_idx >= 0:
-            self.status_combo.setCurrentIndex(status_idx)
-
-        target_preset_id = project.preset_id
-        assign_idx = self.assign_combo.findData(target_preset_id)
-        if assign_idx >= 0:
-            self.assign_combo.setCurrentIndex(assign_idx)
-        self._refresh_quality_snapshot(project_id)
-
-    @staticmethod
-    def _quality_state_text(state: str) -> str:
-        mapping = {
-            "disabled": "desactivee",
-            "not_validated": "non validee",
-            "stale": "a revalider",
-            "validated": "validee",
-        }
-        return mapping.get(str(state), str(state))
-
-    def _collect_quality_config(self) -> dict:
-        return {
-            "enabled": self.quality_enabled_check.isChecked(),
-            "rules": {
-                "min_rating_non_zero": {"enabled": self.quality_rule_min_rating_check.isChecked()},
-                "metadata_author_copyright": {"enabled": self.quality_rule_metadata_check.isChecked()},
-                "watermark_enabled": {"enabled": self.quality_rule_watermark_check.isChecked()},
-            },
-        }
-
-    def _set_quality_snapshot(self, snapshot: dict | None) -> None:
-        if not snapshot:
-            self.quality_enabled_check.setChecked(True)
-            self.quality_rule_min_rating_check.setChecked(True)
-            self.quality_rule_metadata_check.setChecked(True)
-            self.quality_rule_watermark_check.setChecked(False)
-            self.quality_state_label.setText("Etat: -")
-            self.quality_validated_label.setText("Validation: -")
-            self.quality_summary_label.setText("Resume: -")
-            return
-
-        config = snapshot.get("config", {}) if isinstance(snapshot, dict) else {}
-        rules = config.get("rules", {}) if isinstance(config, dict) else {}
-        self.quality_enabled_check.setChecked(bool(config.get("enabled", True)))
-        self.quality_rule_min_rating_check.setChecked(
-            bool((rules.get("min_rating_non_zero", {}) or {}).get("enabled", True))
-        )
-        self.quality_rule_metadata_check.setChecked(
-            bool((rules.get("metadata_author_copyright", {}) or {}).get("enabled", True))
-        )
-        self.quality_rule_watermark_check.setChecked(
-            bool((rules.get("watermark_enabled", {}) or {}).get("enabled", False))
-        )
-
-        state = str(snapshot.get("status", "not_validated"))
-        validated_at = str(snapshot.get("validated_at_utc") or "-")
-        summary = snapshot.get("summary", {}) if isinstance(snapshot.get("summary"), dict) else {}
-        exportable = int(summary.get("exportable_count", 0) or 0)
-        missing_author = int(summary.get("missing_author_count", 0) or 0)
-        missing_copyright = int(summary.get("missing_copyright_count", 0) or 0)
-        issue_count = len(snapshot.get("issues", []) if isinstance(snapshot.get("issues"), list) else [])
-
-        self.quality_state_label.setText(
-            f"Etat: {self._quality_state_text(state)} | erreurs: {issue_count}"
-        )
-        self.quality_validated_label.setText(f"Validation: {validated_at}")
-        self.quality_summary_label.setText(
-            "Resume: "
-            f"exportables={exportable}, author manquant={missing_author}, "
-            f"copyright manquant={missing_copyright}"
-        )
-
-    def _refresh_quality_snapshot(self, project_id: int | None = None) -> None:
-        selected_project_id = project_id if project_id is not None else self._selected_project_id()
-        if selected_project_id is None:
-            self._set_quality_snapshot(None)
-            return
-        try:
-            snapshot = self.project_service.get_quality_check(int(selected_project_id), export_min_rating=1)
-        except Exception as exc:
-            self.quality_state_label.setText("Etat: erreur")
-            self.quality_validated_label.setText("Validation: -")
-            self.quality_summary_label.setText(f"Resume: {exc}")
-            return
-        self._set_quality_snapshot(snapshot)
-
-    def _save_quality_check(self) -> None:
-        project_id = self._selected_project_id()
-        if project_id is None:
-            QMessageBox.warning(self, "Selection", "Selectionne un projet dans la liste.")
-            return
-        try:
-            snapshot = self.project_service.update_quality_check(int(project_id), self._collect_quality_config())
-            self._set_quality_snapshot(snapshot)
-            self.on_data_changed()
-            QMessageBox.information(self, "Checklist", "Checklist projet mise a jour.")
-        except Exception as exc:
-            QMessageBox.critical(self, "Checklist", str(exc))
-
-    def _validate_quality_check(self) -> None:
-        project_id = self._selected_project_id()
-        if project_id is None:
-            QMessageBox.warning(self, "Selection", "Selectionne un projet dans la liste.")
-            return
-        try:
-            snapshot = self.project_service.validate_quality_check(int(project_id))
-            self._set_quality_snapshot(snapshot)
-            self.on_data_changed()
-            QMessageBox.information(self, "Checklist", "Checklist validee pour ce projet.")
-        except QualityChecklistError as exc:
-            self._refresh_quality_snapshot(project_id)
-            QMessageBox.critical(self, "Checklist", str(exc))
-        except Exception as exc:
-            QMessageBox.critical(self, "Checklist", str(exc))
-
-    def _show_quality_details(self) -> None:
-        project_id = self._selected_project_id()
-        if project_id is None:
-            QMessageBox.warning(self, "Selection", "Selectionne un projet dans la liste.")
-            return
-        try:
-            snapshot = self.project_service.get_quality_check(int(project_id), export_min_rating=1)
-        except Exception as exc:
-            QMessageBox.critical(self, "Checklist", str(exc))
-            return
-
-        lines = [
-            f"Etat: {self._quality_state_text(str(snapshot.get('status', 'not_validated')))}",
-            f"Validation: {snapshot.get('validated_at_utc') or '-'}",
-            "",
-            "Regles:",
-            f"- Checklist active: {int(bool((snapshot.get('config', {}) or {}).get('enabled', True)))}",
-        ]
-        rules = (snapshot.get("config", {}) or {}).get("rules", {})
-        lines.append(f"- Note min > 0: {int(bool((rules.get('min_rating_non_zero', {}) or {}).get('enabled', True)))}")
-        lines.append(
-            "- Metadata Author+Copyright: "
-            f"{int(bool((rules.get('metadata_author_copyright', {}) or {}).get('enabled', True)))}"
-        )
-        lines.append(
-            f"- Watermark actif: {int(bool((rules.get('watermark_enabled', {}) or {}).get('enabled', False)))}"
-        )
-
-        issues = snapshot.get("issues", [])
-        if isinstance(issues, list) and issues:
-            lines.extend(["", "Problemes detectes:"])
-            for issue in issues:
-                message = str((issue or {}).get("message", "")).strip()
-                if message:
-                    lines.append(f"- {message}")
-        else:
-            lines.extend(["", "Problemes detectes: aucun"])
-
-        QMessageBox.information(self, "Checklist qualite", "\n".join(lines))
+# HubTab removed, replaced by ProjectsTab in .projects.py
 
 
 class BatchRenameTab(QWidget):
@@ -2214,14 +1657,18 @@ class BatchRenameTab(QWidget):
         self._loading_ui = False
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
 
-        controls = QGroupBox("Batch Rename")
-        controls_layout = QFormLayout(controls)
-        controls_layout.setVerticalSpacing(8)
+        self._selected_project_id: Optional[int] = None
+        # Redundant project selector removed, follows global context.
 
-        self.project_combo = QComboBox()
-        self.project_combo.currentIndexChanged.connect(self._on_project_changed)
-
+        header = QFrame()
+        header.setObjectName("EditHeaderBar")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 8, 12, 8)
+        header_layout.setSpacing(8)
+        
         self.rejected_mode_combo = QComboBox()
         self.rejected_mode_combo.addItem("Tout", userData="all")
         self.rejected_mode_combo.addItem("A garder", userData="kept")
@@ -2233,15 +1680,15 @@ class BatchRenameTab(QWidget):
             self.min_rating_combo.addItem(str(rating), userData=rating)
         self.min_rating_combo.currentIndexChanged.connect(self._load_assets)
 
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Filtre"))
-        filter_row.addWidget(self.rejected_mode_combo)
-        filter_row.addWidget(QLabel("Note min"))
-        filter_row.addWidget(self.min_rating_combo)
-        filter_refresh_btn = _new_button("Rafraichir")
-        filter_refresh_btn.clicked.connect(self._load_assets)
-        filter_row.addWidget(filter_refresh_btn)
-        filter_row.addStretch(1)
+        header_layout.addWidget(QLabel("Filtre"))
+        header_layout.addWidget(self.rejected_mode_combo)
+        header_layout.addWidget(QLabel("Note min"))
+        header_layout.addWidget(self.min_rating_combo)
+        refresh_btn = _new_button("Rafraichir")
+        refresh_btn.clicked.connect(self._load_assets)
+        header_layout.addWidget(refresh_btn)
+        header_layout.addStretch(1)
+        layout.addWidget(header)
 
         self.pattern_edit = QLineEdit()
         self.pattern_edit.setPlaceholderText("{project}_{date}_{seq:04d}")
@@ -2253,51 +1700,63 @@ class BatchRenameTab(QWidget):
         self.start_seq_spin.setValue(1)
         self.start_seq_spin.valueChanged.connect(self._refresh_preview)
 
-        pattern_row = QHBoxLayout()
-        pattern_row.addWidget(self.pattern_edit, 1)
-        pattern_row.addWidget(QLabel("Seq depart"))
-        pattern_row.addWidget(self.start_seq_spin)
-
-        actions_row = QHBoxLayout()
         self.select_all_btn = _new_button("Tout selectionner")
         self.select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
         self.select_none_btn = _new_button("Tout deselectionner")
         self.select_none_btn.clicked.connect(lambda: self._set_all_checked(False))
-        preview_btn = _new_button("Mettre a jour preview")
+        preview_btn = _new_button("Previsualiser")
         preview_btn.clicked.connect(self._refresh_preview)
         self.run_btn = _new_button("Lancer renommage", primary=True)
         self.run_btn.clicked.connect(self._run_rename)
         self.cancel_btn = _new_button("Annuler")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._cancel_rename)
-        actions_row.addWidget(self.select_all_btn)
-        actions_row.addWidget(self.select_none_btn)
-        actions_row.addWidget(preview_btn)
-        actions_row.addStretch(1)
-        actions_row.addWidget(self.run_btn)
-        actions_row.addWidget(self.cancel_btn)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
         self.summary_label = QLabel("Selection: 0 | a renommer: 0")
-        self.summary_label.setObjectName("CullingMeta")
+        self.summary_label.setObjectName("CardValue")
 
-        controls_layout.addRow("Projet", self.project_combo)
-        controls_layout.addRow("", filter_row)
-        controls_layout.addRow("Pattern", pattern_row)
-        controls_layout.addRow("", actions_row)
-        controls_layout.addRow("Progression", self.progress_bar)
-        controls_layout.addRow("", self.summary_label)
-        layout.addWidget(controls)
+        context_box = QGroupBox("Renommage contextuel")
+        context_layout = QVBoxLayout(context_box)
+        context_layout.setContentsMargins(14, 12, 14, 12)
+        context_layout.setSpacing(8)
 
-        split = QSplitter(Qt.Orientation.Horizontal)
-        self.main_splitter = split
-        split.setChildrenCollapsible(False)
+        pattern_grid = QGridLayout()
+        pattern_grid.setContentsMargins(0, 0, 0, 0)
+        pattern_grid.setHorizontalSpacing(10)
+        pattern_grid.setVerticalSpacing(6)
+        pattern_grid.addWidget(QLabel("Modele"), 0, 0)
+        pattern_grid.addWidget(self.pattern_edit, 0, 1)
+        pattern_grid.addWidget(QLabel("Compteur"), 0, 2)
+        pattern_grid.addWidget(self.start_seq_spin, 0, 3)
+        context_layout.addLayout(pattern_grid)
+        context_layout.addWidget(self.summary_label)
 
-        select_box = QGroupBox("Selection photos")
+        self.preview_text = QPlainTextEdit()
+        self.preview_text.setReadOnly(True)
+        self.preview_text.setMinimumHeight(220)
+        context_layout.addWidget(self.preview_text, 1)
+
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(8)
+        actions_row.addWidget(self.select_all_btn)
+        actions_row.addWidget(self.select_none_btn)
+        actions_row.addWidget(preview_btn)
+        actions_row.addStretch(1)
+        actions_row.addWidget(self.run_btn)
+        actions_row.addWidget(self.cancel_btn)
+        context_layout.addLayout(actions_row)
+        context_layout.addWidget(self.progress_bar)
+        layout.addWidget(context_box)
+
+        select_box = QGroupBox("Selection")
         select_layout = QVBoxLayout(select_box)
+        select_layout.setContentsMargins(10, 8, 10, 10)
+        select_layout.setSpacing(6)
         self.assets_area = QScrollArea()
         self.assets_area.setWidgetResizable(True)
         self.assets_area.setFrameShape(QFrame.Shape.NoFrame)
@@ -2309,44 +1768,22 @@ class BatchRenameTab(QWidget):
         self.assets_layout.setSpacing(8)
         self.assets_area.setWidget(self.assets_content)
         select_layout.addWidget(self.assets_area)
-
-        preview_box = QGroupBox("Preview renommage")
-        preview_layout = QVBoxLayout(preview_box)
-        self.preview_text = QPlainTextEdit()
-        self.preview_text.setReadOnly(True)
-        preview_layout.addWidget(self.preview_text)
-
-        split.addWidget(select_box)
-        split.addWidget(preview_box)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 2)
-        split.setSizes([900, 620])
-        layout.addWidget(split, 1)
+        layout.addWidget(select_box, 1)
+        self.main_splitter = None
 
     def refresh_data(self) -> None:
-        current_project_id = self.project_combo.currentData()
-        self.project_combo.blockSignals(True)
-        self.project_combo.clear()
-        for project in self.project_service.list_projects():
-            self.project_combo.addItem(f"{project.id} - {project.name}", userData=project.id)
-        if current_project_id is not None:
-            idx = self.project_combo.findData(current_project_id)
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-        self.project_combo.blockSignals(False)
-        self._on_project_changed()
+        pass # Combo removed.
 
     def set_selected_project(self, project_id: int) -> None:
-        idx = self.project_combo.findData(int(project_id))
-        if idx >= 0:
-            self.project_combo.setCurrentIndex(idx)
+        self._selected_project_id = project_id
+        self._on_project_changed()
 
     def _on_project_changed(self) -> None:
         self._sync_pattern_from_project()
         self._load_assets()
 
     def _sync_pattern_from_project(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             return
         pattern = "{project}_{date}_{seq:04d}"
@@ -2366,7 +1803,7 @@ class BatchRenameTab(QWidget):
         self._last_auto_pattern = pattern
 
     def _load_assets(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         current_checked = set(self._selected_asset_ids())
         self._clear_asset_cards()
         self._asset_order = []
@@ -2404,17 +1841,12 @@ class BatchRenameTab(QWidget):
                 check = QCheckBox(Path(str(asset.src_path)).name)
                 check.setChecked(asset.id in current_checked if current_checked else True)
                 check.toggled.connect(self._refresh_preview)
+                check.setToolTip(str(asset.src_path))
                 top_row.addWidget(check, 1)
                 badge = QLabel(f"note {int(asset.rating)}")
                 badge.setObjectName("CardBadge")
                 top_row.addWidget(badge)
                 card_layout.addLayout(top_row)
-
-                state = "rejetee" if bool(asset.is_rejected) else "garder"
-                path_label = QLabel(f"{state} | {asset.src_path}")
-                path_label.setObjectName("CardMuted")
-                path_label.setWordWrap(True)
-                card_layout.addWidget(path_label)
 
                 self._asset_order.append(int(asset.id))
                 self._asset_checks[int(asset.id)] = check
@@ -2447,7 +1879,7 @@ class BatchRenameTab(QWidget):
     def _refresh_preview(self) -> None:
         if self._loading_ui:
             return
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             self.preview_text.setPlainText("Selectionne un projet.")
             self.summary_label.setText("Selection: 0 | a renommer: 0")
@@ -2498,7 +1930,7 @@ class BatchRenameTab(QWidget):
         if self._job_thread is not None:
             QMessageBox.warning(self, "Operation en cours", "Un renommage est deja en cours.")
             return
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             QMessageBox.warning(self, "Validation", "Selectionne un projet.")
             return
@@ -2653,11 +2085,12 @@ class ImportExportTab(QWidget):
         )
 
         layout = QVBoxLayout(self)
-        self.sections = QTabWidget()
-        self.sections.addTab(self.import_tab, "Import")
-        self.sections.addTab(self.culling_tab, "Tri")
-        self.sections.addTab(self.edit_tab, "Edit")
-        self.sections.addTab(self.export_tab, "Export")
+        # Sprint 1: remove internal tabs and keep only page-level navigation from sidebar.
+        self.sections = QStackedWidget()
+        self.sections.addWidget(self.import_tab)
+        self.sections.addWidget(self.culling_tab)
+        self.sections.addWidget(self.edit_tab)
+        self.sections.addWidget(self.export_tab)
         layout.addWidget(self.sections)
 
     def refresh_data(self) -> None:
@@ -2709,11 +2142,37 @@ class ImportTab(QWidget):
         self._job_worker: JobWorker | None = None
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
-        controls = QGroupBox("Import securise")
-        controls_layout = QFormLayout(controls)
+        self._selected_project_id: Optional[int] = None
+        # Redundant project selector removed, now follows global context from header.
 
-        self.project_combo = QComboBox()
+        cards_row = QHBoxLayout()
+        cards_row.setContentsMargins(0, 0, 0, 0)
+        cards_row.setSpacing(10)
+
+        source_box = QGroupBox("Sources d'import")
+        source_layout = QVBoxLayout(source_box)
+        source_layout.setContentsMargins(14, 12, 14, 12)
+        source_layout.setSpacing(8)
+        source_hint = QLabel("Choisis une source puis lance l'ingestion securisee.")
+        source_hint.setObjectName("CardMuted")
+        source_layout.addWidget(source_hint)
+
+        bento_grid = QGridLayout()
+        bento_grid.setContentsMargins(0, 0, 0, 0)
+        bento_grid.setHorizontalSpacing(8)
+        bento_grid.setVerticalSpacing(8)
+        self.source_sd_btn = self._build_source_bento_button("Carte SD", QStyle.StandardPixmap.SP_DriveFDIcon)
+        self.source_drive_btn = self._build_source_bento_button("Disque", QStyle.StandardPixmap.SP_DriveHDIcon)
+        self.source_folder_btn = self._build_source_bento_button("Dossier", QStyle.StandardPixmap.SP_DirOpenIcon)
+        for btn in (self.source_sd_btn, self.source_drive_btn, self.source_folder_btn):
+            btn.clicked.connect(self._pick_source)
+        bento_grid.addWidget(self.source_sd_btn, 0, 0)
+        bento_grid.addWidget(self.source_drive_btn, 0, 1)
+        bento_grid.addWidget(self.source_folder_btn, 0, 2)
+        source_layout.addLayout(bento_grid)
 
         source_row = QHBoxLayout()
         self.source_edit = QLineEdit()
@@ -2722,7 +2181,12 @@ class ImportTab(QWidget):
         browse_btn.clicked.connect(self._pick_source)
         source_row.addWidget(self.source_edit)
         source_row.addWidget(browse_btn)
+        source_layout.addLayout(source_row)
 
+        action_box = QGroupBox("Execution")
+        action_layout = QVBoxLayout(action_box)
+        action_layout.setContentsMargins(14, 12, 14, 12)
+        action_layout.setSpacing(8)
         self.run_btn = _new_button("Lancer Import", primary=True)
         self.run_btn.clicked.connect(self._run_import)
         self.cancel_btn = _new_button("Annuler")
@@ -2732,39 +2196,44 @@ class ImportTab(QWidget):
         run_row = QHBoxLayout()
         run_row.addWidget(self.run_btn)
         run_row.addWidget(self.cancel_btn)
+        action_layout.addLayout(run_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
+        action_layout.addWidget(self.progress_bar)
+        self.import_meta_label = QLabel("Pret.")
+        self.import_meta_label.setObjectName("CullingMeta")
+        action_layout.addWidget(self.import_meta_label)
 
-        controls_layout.addRow("Projet", self.project_combo)
-        controls_layout.addRow("Source", source_row)
-        controls_layout.addRow("", run_row)
-        controls_layout.addRow("Progression", self.progress_bar)
+        cards_row.addWidget(source_box, 2)
+        cards_row.addWidget(action_box, 1)
+        layout.addLayout(cards_row)
 
-        layout.addWidget(controls)
-
+        log_box = QGroupBox("Journal import")
+        log_layout = QVBoxLayout(log_box)
+        log_layout.setContentsMargins(10, 10, 10, 10)
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
-        layout.addWidget(self.log_text)
+        log_layout.addWidget(self.log_text)
+        layout.addWidget(log_box, 1)
+
+    def _build_source_bento_button(self, label: str, icon_type: QStyle.StandardPixmap) -> QToolButton:
+        btn = QToolButton()
+        btn.setObjectName("IngestBentoButton")
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        btn.setIcon(self.style().standardIcon(icon_type))
+        btn.setText(label)
+        btn.setMinimumSize(108, 74)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        return btn
 
     def refresh_data(self) -> None:
-        current = self.project_combo.currentData()
-        self.project_combo.blockSignals(True)
-        self.project_combo.clear()
-        for project in self.project_service.list_projects():
-            self.project_combo.addItem(f"{project.id} - {project.name}", userData=project.id)
-        if current is not None:
-            idx = self.project_combo.findData(current)
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-        self.project_combo.blockSignals(False)
+        pass # Combo removed, nothing to refresh here for now.
 
     def set_selected_project(self, project_id: int) -> None:
-        idx = self.project_combo.findData(project_id)
-        if idx >= 0:
-            self.project_combo.setCurrentIndex(idx)
+        self._selected_project_id = project_id
 
     def _pick_source(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Choisir dossier source")
@@ -2775,7 +2244,7 @@ class ImportTab(QWidget):
         if self._job_thread is not None:
             QMessageBox.warning(self, "Operation en cours", "Un import est deja en cours.")
             return
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         source = self.source_edit.text().strip()
         if project_id is None:
             QMessageBox.warning(self, "Validation", "Selectionne un projet.")
@@ -2809,12 +2278,14 @@ class ImportTab(QWidget):
         if self._job_worker is not None:
             self._job_worker.cancel()
             self.cancel_btn.setEnabled(False)
+            self.import_meta_label.setText("Annulation demandee...")
             self.on_job_event("[Import] Annulation demandee par l'utilisateur.")
 
     def _on_import_progress(self, done: int, total: int, detail: str) -> None:
         safe_total = max(1, int(total))
         self.progress_bar.setMaximum(safe_total)
         self.progress_bar.setValue(max(0, min(int(done), safe_total)))
+        self.import_meta_label.setText(f"{int(done)}/{int(total)} - {detail or 'copie...'}")
 
     def _on_import_result(self, result) -> None:
         self.log_text.appendPlainText(
@@ -2825,6 +2296,9 @@ class ImportTab(QWidget):
             self.log_text.appendPlainText(result.message)
         self.on_job_event(
             f"[Import] {result.status} | total={result.total}, copied={result.copied}, failed={result.failed}"
+        )
+        self.import_meta_label.setText(
+            f"{result.status} | copies={result.copied} | fails={result.failed}"
         )
         self.on_data_changed()
 
@@ -2862,6 +2336,7 @@ class CullingTab(QWidget):
         self._job_thread: QThread | None = None
         self._job_worker: JobWorker | None = None
         self.focus_mode_enabled = False
+        self.batch_solo_mode = False
         self.asset_card_widgets: dict[int, QFrame] = {}
         self.show_path_overlay = False
         self._preview_hovered = False
@@ -2889,8 +2364,8 @@ class CullingTab(QWidget):
         controls_layout = QFormLayout(controls)
         controls_layout.setVerticalSpacing(6)
 
-        self.project_combo = QComboBox()
-        self.project_combo.currentIndexChanged.connect(self._load_assets)
+        self._selected_project_id: Optional[int] = None
+        # Redundant project selector removed.
 
         self.rejected_mode_combo = QComboBox()
         self.rejected_mode_combo.addItem("Tout", userData="all")
@@ -2945,11 +2420,16 @@ class CullingTab(QWidget):
         filter_row.addWidget(self.rejected_mode_combo)
         filter_row.addWidget(QLabel("Note min"))
         filter_row.addWidget(self.min_rating_filter_combo)
-        refresh_btn = _new_button("Rafraichir")
-        refresh_btn.clicked.connect(self._load_assets)
-        filter_row.addWidget(refresh_btn)
+        self.advanced_filters_btn = _new_button("Filtres avances")
+        self.advanced_filters_btn.setCheckable(True)
+        self.advanced_filters_btn.toggled.connect(self._toggle_advanced_filters)
+        filter_row.addWidget(self.advanced_filters_btn)
+        filter_row.addStretch(1)
 
-        advanced_filter_row = QHBoxLayout()
+        self.advanced_filters_widget = QWidget()
+        advanced_filter_row = QHBoxLayout(self.advanced_filters_widget)
+        advanced_filter_row.setContentsMargins(0, 0, 0, 0)
+        advanced_filter_row.setSpacing(6)
         advanced_filter_row.addWidget(QLabel("ISO"))
         advanced_filter_row.addWidget(self.iso_min_spin)
         advanced_filter_row.addWidget(QLabel("a"))
@@ -2963,6 +2443,7 @@ class CullingTab(QWidget):
         advanced_filter_row.addWidget(self.date_to_check)
         advanced_filter_row.addWidget(self.date_to_edit)
         advanced_filter_row.addStretch(1)
+        self.advanced_filters_widget.setVisible(False)
 
         quick_row = QHBoxLayout()
         self.prev_btn = _new_button("Precedent")
@@ -2981,6 +2462,9 @@ class CullingTab(QWidget):
         self.batch_toggle_btn = _new_button("Batch (B)")
         self.batch_toggle_btn.setCheckable(True)
         self.batch_toggle_btn.toggled.connect(self._toggle_batch_panel)
+        self.batch_solo_btn = _new_button("Solo Batch")
+        self.batch_solo_btn.setCheckable(True)
+        self.batch_solo_btn.toggled.connect(self._set_batch_solo_mode)
         self.focus_mode_btn = _new_button("Mode focus (F)")
         self.focus_mode_btn.setCheckable(True)
         self.focus_mode_btn.toggled.connect(self._set_focus_mode)
@@ -2992,11 +2476,12 @@ class CullingTab(QWidget):
         quick_row.addWidget(self.reject_btn)
         quick_row.addWidget(self.auto_advance_check)
         quick_row.addWidget(self.batch_toggle_btn)
+        quick_row.addWidget(self.batch_solo_btn)
         quick_row.addStretch(1)
 
-        controls_layout.addRow("Projet", self.project_combo)
+        # controls_layout.addRow("Projet", self.project_combo) # Removed
         controls_layout.addRow("", filter_row)
-        controls_layout.addRow("", advanced_filter_row)
+        controls_layout.addRow("", self.advanced_filters_widget)
         controls_layout.addRow("", quick_row)
         layout.addWidget(controls)
 
@@ -3225,26 +2710,19 @@ class CullingTab(QWidget):
         info_shortcut.activated.connect(self._toggle_overlay_shortcut)
         self._shortcut_refs.append(info_shortcut)
 
+    def _toggle_advanced_filters(self, opened: bool) -> None:
+        self.advanced_filters_widget.setVisible(bool(opened))
+        self.advanced_filters_btn.setText("Filtres avances ON" if opened else "Filtres avances")
+
     def refresh_data(self) -> None:
-        current = self.project_combo.currentData()
-        self.project_combo.blockSignals(True)
-        self.project_combo.clear()
-        for project in self.project_service.list_projects():
-            self.project_combo.addItem(f"{project.id} - {project.name}", userData=project.id)
-        if current is not None:
-            idx = self.project_combo.findData(current)
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-        self.project_combo.blockSignals(False)
         self._load_assets()
 
     def set_selected_project(self, project_id: int) -> None:
-        idx = self.project_combo.findData(project_id)
-        if idx >= 0:
-            self.project_combo.setCurrentIndex(idx)
+        self._selected_project_id = project_id
+        self._load_assets()
 
     def _load_assets(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             self._clear_asset_cards()
             self._clear_filmstrip()
@@ -3698,8 +3176,7 @@ class CullingTab(QWidget):
         self.focus_mode_enabled = bool(enabled)
         if self.focus_mode_enabled and self.batch_toggle_btn.isChecked():
             self.batch_toggle_btn.setChecked(False)
-        self.controls_box.setVisible(not self.focus_mode_enabled)
-        self.filmstrip_frame.setVisible(not self.focus_mode_enabled)
+        self._apply_culling_layout_mode()
         if self.focus_mode_enabled:
             self.on_job_event("[Tri] Mode focus active.")
         else:
@@ -3711,8 +3188,27 @@ class CullingTab(QWidget):
     def _toggle_batch_panel(self, opened: bool) -> None:
         if opened and self.focus_mode_enabled:
             self.focus_mode_btn.setChecked(False)
+        if not opened and self.batch_solo_btn.isChecked():
+            self.batch_solo_btn.setChecked(False)
         self.actions_box.setVisible(bool(opened))
         self.batch_toggle_btn.setText("Batch (B) ON" if opened else "Batch (B)")
+        self._apply_culling_layout_mode()
+
+    def _set_batch_solo_mode(self, enabled: bool) -> None:
+        self.batch_solo_mode = bool(enabled)
+        if self.batch_solo_mode and self.focus_mode_enabled:
+            self.focus_mode_btn.setChecked(False)
+        if self.batch_solo_mode and not self.batch_toggle_btn.isChecked():
+            self.batch_toggle_btn.setChecked(True)
+        self._apply_culling_layout_mode()
+        self.on_job_event("[Tri] Solo Batch active." if self.batch_solo_mode else "[Tri] Solo Batch desactive.")
+
+    def _apply_culling_layout_mode(self) -> None:
+        batch_opened = bool(self.actions_box.isVisible())
+        solo_batch = bool(self.batch_solo_mode and batch_opened)
+        hide_chrome = bool(self.focus_mode_enabled or solo_batch)
+        self.controls_box.setVisible(not hide_chrome)
+        self.filmstrip_frame.setVisible(not hide_chrome)
 
     def _toggle_overlay_shortcut(self) -> None:
         self.overlay_toggle_btn.setChecked(not self.overlay_toggle_btn.isChecked())
@@ -3847,7 +3343,7 @@ class CullingTab(QWidget):
         if self._job_thread is not None:
             QMessageBox.warning(self, "Operation en cours", "Un batch tri est deja en cours.")
             return
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             QMessageBox.warning(self, "Validation", "Selectionne un projet.")
             return
@@ -3949,6 +3445,7 @@ class EditTab(QWidget):
         self._form_loading = False
         self._metadata_form_loading = False
         self._before_mode = False
+        self._solo_mode_enabled = False
         self._copied_settings: dict[str, object] | None = None
 
         self.selected_asset_id: int | None = None
@@ -3967,8 +3464,8 @@ class EditTab(QWidget):
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(12, 8, 12, 8)
         controls_layout.setSpacing(8)
-        self.project_combo = QComboBox()
-        self.project_combo.currentIndexChanged.connect(self._load_assets)
+        self._selected_project_id: Optional[int] = None
+        # Redundant project selector removed.
 
         self.rejected_mode_combo = QComboBox()
         self.rejected_mode_combo.addItem("A garder", userData="kept")
@@ -3987,19 +3484,34 @@ class EditTab(QWidget):
         filter_label.setObjectName("EditFilterLabel")
         rating_label = QLabel("Note min")
         rating_label.setObjectName("EditFilterLabel")
-        refresh_btn = _new_button("Rafraichir")
-        refresh_btn.clicked.connect(self._load_assets)
+        self.panel_focus_label = QLabel("Panneau")
+        self.panel_focus_label.setObjectName("EditFilterLabel")
+        self.panel_focus_combo = QComboBox()
+        self.panel_focus_combo.addItem("Exposition", userData="light")
+        self.panel_focus_combo.addItem("Balance", userData="color")
+        self.panel_focus_combo.addItem("Geometrie", userData="geometry")
+        self.panel_focus_combo.addItem("Actions", userData="actions")
+        self.panel_focus_combo.currentIndexChanged.connect(self._apply_solo_panel_visibility)
+        self.solo_mode_btn = _new_button("Solo mode")
+        self.solo_mode_btn.setCheckable(True)
+        self.solo_mode_btn.toggled.connect(self._toggle_solo_mode)
         controls_layout.addWidget(project_label)
-        controls_layout.addWidget(self.project_combo, 2)
+        # controls_layout.addWidget(self.project_combo, 2) # Removed
         controls_layout.addWidget(filter_label)
         controls_layout.addWidget(self.rejected_mode_combo)
         controls_layout.addWidget(rating_label)
         controls_layout.addWidget(self.min_rating_filter_combo)
-        controls_layout.addWidget(refresh_btn)
+        controls_layout.addWidget(self.panel_focus_label)
+        controls_layout.addWidget(self.panel_focus_combo)
+        controls_layout.addWidget(self.solo_mode_btn)
         controls_layout.addStretch(1)
+        self._solo_hidden_widgets = [self.rejected_mode_combo, rating_label, self.min_rating_filter_combo]
+        self.panel_focus_label.setVisible(False)
+        self.panel_focus_combo.setVisible(False)
         layout.addWidget(controls)
 
         body = QSplitter(Qt.Orientation.Horizontal)
+        self.body_splitter = body
 
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
@@ -4020,6 +3532,7 @@ class EditTab(QWidget):
         self.before_after_badge = QLabel("AVANT")
         self.before_after_badge.setObjectName("CullingHud")
         self.before_after_badge.setProperty("hudState", "info")
+        self.before_after_badge.setVisible(False)
         preview_grid.addWidget(self.preview_label, 0, 0)
         preview_grid.addWidget(
             self.before_after_badge,
@@ -4125,21 +3638,37 @@ class EditTab(QWidget):
         self.sync_btn.clicked.connect(self._start_sync_filtered)
         self.reset_btn = _new_button("Reset")
         self.reset_btn.clicked.connect(self._reset_selected_settings)
-        self.before_after_btn = _new_button("Avant/Apres (Y)")
+        self.before_after_btn = _new_button("A/B")
         self.before_after_btn.setCheckable(True)
+        self.before_after_btn.setToolTip("Comparer avant/apres (Y)")
+        self.before_after_btn.setMaximumWidth(70)
         self.before_after_btn.toggled.connect(self._toggle_before_after)
+        self.before_after_btn.setVisible(False)
         for btn in (self.apply_btn, self.copy_btn, self.paste_btn, self.sync_btn, self.reset_btn, self.before_after_btn):
             btn.setMinimumHeight(30)
         action_layout.addWidget(self.apply_btn)
         action_layout.addWidget(self.copy_btn)
         action_layout.addWidget(self.paste_btn)
-        action_layout.addWidget(self.sync_btn)
         action_layout.addWidget(self.reset_btn)
         action_layout.addWidget(self.before_after_btn)
 
+        self.pro_tools_toggle = QToolButton()
+        self.pro_tools_toggle.setText("Outils avances")
+        self.pro_tools_toggle.setCheckable(True)
+        self.pro_tools_toggle.setChecked(False)
+        self.pro_tools_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.pro_tools_toggle.toggled.connect(self._toggle_pro_tools_panel)
+        action_layout.addWidget(self.pro_tools_toggle)
+
+        self.pro_tools_panel = QWidget()
+        pro_tools_layout = QVBoxLayout(self.pro_tools_panel)
+        pro_tools_layout.setContentsMargins(0, 0, 0, 0)
+        pro_tools_layout.setSpacing(8)
+        pro_tools_layout.addWidget(self.sync_btn)
+
         metadata_title = QLabel("IPTC / Metadata")
         metadata_title.setObjectName("CardMuted")
-        action_layout.addWidget(metadata_title)
+        pro_tools_layout.addWidget(metadata_title)
         metadata_form = QFormLayout()
         metadata_form.setContentsMargins(0, 0, 0, 0)
         metadata_form.setHorizontalSpacing(8)
@@ -4153,7 +3682,7 @@ class EditTab(QWidget):
         metadata_form.addRow("Keywords", self.meta_keywords_edit)
         metadata_form.addRow("Author", self.meta_author_edit)
         metadata_form.addRow("Copyright", self.meta_copyright_edit)
-        action_layout.addLayout(metadata_form)
+        pro_tools_layout.addLayout(metadata_form)
         metadata_btn_row = QHBoxLayout()
         self.meta_save_btn = _new_button("Sauver IPTC")
         self.meta_save_btn.clicked.connect(self._save_selected_metadata)
@@ -4161,11 +3690,11 @@ class EditTab(QWidget):
         self.meta_sync_btn.clicked.connect(self._sync_selected_metadata_to_filtered)
         metadata_btn_row.addWidget(self.meta_save_btn)
         metadata_btn_row.addWidget(self.meta_sync_btn)
-        action_layout.addLayout(metadata_btn_row)
+        pro_tools_layout.addLayout(metadata_btn_row)
         self.exif_info_label = QLabel("EXIF: -")
         self.exif_info_label.setObjectName("CardMuted")
         self.exif_info_label.setWordWrap(True)
-        action_layout.addWidget(self.exif_info_label)
+        pro_tools_layout.addWidget(self.exif_info_label)
 
         advanced_header = QHBoxLayout()
         self.advanced_toggle = QToolButton()
@@ -4179,7 +3708,7 @@ class EditTab(QWidget):
         advanced_header.addWidget(advanced_title)
         advanced_header.addStretch(1)
         advanced_header.addWidget(self.advanced_toggle)
-        action_layout.addLayout(advanced_header)
+        pro_tools_layout.addLayout(advanced_header)
 
         self.advanced_panel = QWidget()
         advanced_layout = QVBoxLayout(self.advanced_panel)
@@ -4217,7 +3746,7 @@ class EditTab(QWidget):
         advanced_layout.addLayout(self._build_slider_row("Clarity", self.clarity_slider, self.clarity_value_label))
         self.advanced_panel.setVisible(False)
         self.advanced_toggle.toggled.connect(self._toggle_advanced_panel)
-        action_layout.addWidget(self.advanced_panel)
+        pro_tools_layout.addWidget(self.advanced_panel)
 
         self.sync_progress = QProgressBar()
         self.sync_progress.setMinimum(0)
@@ -4227,11 +3756,19 @@ class EditTab(QWidget):
         self.sync_cancel_btn.setEnabled(False)
         self.sync_cancel_btn.clicked.connect(self._cancel_sync)
         self.sync_cancel_btn.setMinimumHeight(30)
-        action_layout.addWidget(self.sync_progress)
-        action_layout.addWidget(self.sync_cancel_btn)
+        pro_tools_layout.addWidget(self.sync_progress)
+        pro_tools_layout.addWidget(self.sync_cancel_btn)
+        self.pro_tools_panel.setVisible(False)
+        action_layout.addWidget(self.pro_tools_panel)
         action_layout.addStretch(1)
         self.action_scroll.setWidget(action_content)
         action_root_layout.addWidget(self.action_scroll, 1)
+        self._edit_panel_widgets = {
+            "light": self.light_box,
+            "color": self.color_box,
+            "geometry": self.geometry_box,
+            "actions": self.action_box,
+        }
 
         dock_layout.addWidget(self.light_box, 1)
         dock_layout.addWidget(self.color_box, 1)
@@ -4240,6 +3777,7 @@ class EditTab(QWidget):
         center_layout.addWidget(self.edit_dock)
 
         list_panel = QFrame()
+        self.list_panel = list_panel
         list_panel.setObjectName("EditAssetList")
         list_panel.setMinimumWidth(280)
         list_panel.setMaximumWidth(420)
@@ -4353,33 +3891,51 @@ class EditTab(QWidget):
         sync_shortcut.activated.connect(self._start_sync_filtered)
         self._shortcut_refs.append(sync_shortcut)
 
-        before_after_shortcut = QShortcut(QKeySequence("Y"), self)
-        before_after_shortcut.activated.connect(
-            lambda: self.before_after_btn.setChecked(not self.before_after_btn.isChecked())
-        )
-        self._shortcut_refs.append(before_after_shortcut)
+        solo_shortcut = QShortcut(QKeySequence("F"), self)
+        solo_shortcut.activated.connect(lambda: self.solo_mode_btn.setChecked(not self.solo_mode_btn.isChecked()))
+        self._shortcut_refs.append(solo_shortcut)
 
     def refresh_data(self) -> None:
-        current = self.project_combo.currentData()
-        self.project_combo.blockSignals(True)
-        self.project_combo.clear()
-        for project in self.project_service.list_projects():
-            self.project_combo.addItem(f"{project.id} - {project.name}", userData=project.id)
-        if current is not None:
-            idx = self.project_combo.findData(current)
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-        self.project_combo.blockSignals(False)
         self._load_assets()
 
     def set_selected_project(self, project_id: int) -> None:
-        idx = self.project_combo.findData(project_id)
-        if idx >= 0:
-            self.project_combo.setCurrentIndex(idx)
+        self._selected_project_id = project_id
+        self._load_assets()
 
     def _toggle_advanced_panel(self, opened: bool) -> None:
         self.advanced_panel.setVisible(opened)
         self.advanced_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+
+    def _toggle_pro_tools_panel(self, opened: bool) -> None:
+        self.pro_tools_panel.setVisible(bool(opened))
+        self.pro_tools_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+
+    def _toggle_solo_mode(self, enabled: bool) -> None:
+        self._solo_mode_enabled = bool(enabled)
+        for widget in self._solo_hidden_widgets:
+            widget.setVisible(not self._solo_mode_enabled)
+        self.panel_focus_label.setVisible(self._solo_mode_enabled)
+        self.panel_focus_combo.setVisible(self._solo_mode_enabled)
+        self.list_panel.setVisible(not self._solo_mode_enabled)
+        if self._solo_mode_enabled:
+            self.preview_label.setMinimumHeight(460)
+            total = max(1, int(self.body_splitter.width()))
+            self.body_splitter.setSizes([total, 0])
+            self.pro_tools_toggle.setChecked(False)
+            self.advanced_toggle.setChecked(False)
+        else:
+            self.preview_label.setMinimumHeight(340)
+            self.reset_layout_after_shell_resize()
+        self._apply_solo_panel_visibility()
+
+    def _apply_solo_panel_visibility(self) -> None:
+        if not self._solo_mode_enabled:
+            for panel in self._edit_panel_widgets.values():
+                panel.setVisible(True)
+            return
+        selected_key = str(self.panel_focus_combo.currentData() or "light")
+        for key, panel in self._edit_panel_widgets.items():
+            panel.setVisible(key == selected_key)
 
     def _toggle_before_after(self, enabled: bool) -> None:
         self._before_mode = bool(enabled)
@@ -4402,7 +3958,7 @@ class EditTab(QWidget):
         self._autosave_timer.start(220)
 
     def _load_assets(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             self._clear_asset_cards()
             self._set_selected_asset(None)
@@ -4610,6 +4166,10 @@ class EditTab(QWidget):
         splitter = getattr(self, "body_splitter", None)
         if splitter is None:
             return
+        if self._solo_mode_enabled:
+            total = max(1, int(splitter.width()))
+            splitter.setSizes([total, 0])
+            return
         total = max(1, int(splitter.width()))
         right = min(420, max(280, int(total * 0.24)))
         left = max(420, total - right)
@@ -4731,7 +4291,7 @@ class EditTab(QWidget):
             QMessageBox.critical(self, "Erreur metadata", str(exc))
 
     def _sync_selected_metadata_to_filtered(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         asset_id = self.selected_asset_id
         if project_id is None or asset_id is None:
             QMessageBox.warning(self, "Validation", "Selectionne un projet et un asset source.")
@@ -4808,7 +4368,7 @@ class EditTab(QWidget):
         if self._job_thread is not None:
             QMessageBox.warning(self, "Operation en cours", "Un sync edit est deja en cours.")
             return
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         asset_id = self.selected_asset_id
         if project_id is None or asset_id is None:
             QMessageBox.warning(self, "Validation", "Selectionne un projet et un asset source.")
@@ -4906,8 +4466,8 @@ class ExportTab(QWidget):
         controls = QGroupBox("Export multi-profils")
         controls_layout = QFormLayout(controls)
 
-        self.project_combo = QComboBox()
-        self.project_combo.currentIndexChanged.connect(self._sync_export_context)
+        self._selected_project_id: Optional[int] = None
+        # Redundant project selector removed.
 
         destination_row = QHBoxLayout()
         self.destination_edit = QLineEdit()
@@ -4969,7 +4529,7 @@ class ExportTab(QWidget):
         delivery_row.addWidget(self.report_check)
         delivery_row.addWidget(self.contact_sheet_check)
 
-        self.run_btn = _new_button("Ajouter + Lancer", primary=True)
+        self.run_btn = _new_button("Lancer export", primary=True)
         self.run_btn.clicked.connect(self._run_export)
         self.queue_add_btn = _new_button("Ajouter file")
         self.queue_add_btn.clicked.connect(self._enqueue_current_export)
@@ -4978,12 +4538,27 @@ class ExportTab(QWidget):
         self.cancel_btn = _new_button("Annuler")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._cancel_export)
+        self.queue_controls_toggle = QToolButton()
+        self.queue_controls_toggle.setText("File avancee")
+        self.queue_controls_toggle.setCheckable(True)
+        self.queue_controls_toggle.setChecked(False)
+        self.queue_controls_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.queue_controls_toggle.toggled.connect(self._toggle_advanced_queue_controls)
 
         run_row = QHBoxLayout()
         run_row.addWidget(self.run_btn)
-        run_row.addWidget(self.queue_add_btn)
-        run_row.addWidget(self.start_queue_btn)
         run_row.addWidget(self.cancel_btn)
+        run_row.addStretch(1)
+        run_row.addWidget(self.queue_controls_toggle)
+
+        self.queue_controls_panel = QWidget()
+        queue_controls_layout = QHBoxLayout(self.queue_controls_panel)
+        queue_controls_layout.setContentsMargins(0, 0, 0, 0)
+        queue_controls_layout.setSpacing(8)
+        queue_controls_layout.addStretch(1)
+        queue_controls_layout.addWidget(self.queue_add_btn)
+        queue_controls_layout.addWidget(self.start_queue_btn)
+        self.queue_controls_panel.setVisible(False)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
@@ -4992,20 +4567,34 @@ class ExportTab(QWidget):
         self.eta_label = QLabel("ETA: -")
         self.eta_label.setObjectName("CullingMeta")
 
-        controls_layout.addRow("Projet", self.project_combo)
+        # controls_layout.addRow("Projet", self.project_combo) # Removed
         controls_layout.addRow("Destination", destination_row)
         controls_layout.addRow("Profils", profiles_row)
         controls_layout.addRow("Note min", self.min_rating_combo)
         controls_layout.addRow("Checklist", quality_widget)
         controls_layout.addRow("Livraison", delivery_row)
         controls_layout.addRow("", run_row)
+        controls_layout.addRow("", self.queue_controls_panel)
         controls_layout.addRow("Progression", self.progress_bar)
         controls_layout.addRow("", self.eta_label)
 
         layout.addWidget(controls)
 
-        queue_box = QGroupBox("File d'attente exports")
-        queue_layout = QVBoxLayout(queue_box)
+        self.queue_section_toggle = QToolButton()
+        self.queue_section_toggle.setText("Queue et logs")
+        self.queue_section_toggle.setCheckable(True)
+        self.queue_section_toggle.setChecked(False)
+        self.queue_section_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.queue_section_toggle.toggled.connect(self._toggle_queue_section)
+        layout.addWidget(self.queue_section_toggle)
+
+        self.queue_section_widget = QWidget()
+        queue_section_layout = QVBoxLayout(self.queue_section_widget)
+        queue_section_layout.setContentsMargins(0, 0, 0, 0)
+        queue_section_layout.setSpacing(8)
+
+        self.queue_box = QGroupBox("File d'attente exports")
+        queue_layout = QVBoxLayout(self.queue_box)
 
         queue_header = QHBoxLayout()
         self.queue_state_label = QLabel("Queue: idle")
@@ -5041,12 +4630,13 @@ class ExportTab(QWidget):
         self.queue_cards_layout.setSpacing(8)
         self.queue_cards_area.setWidget(self.queue_cards_content)
         queue_layout.addWidget(self.queue_cards_area)
-
-        layout.addWidget(queue_box)
+        queue_section_layout.addWidget(self.queue_box)
 
         self.log_text = QPlainTextEdit()
         self.log_text.setReadOnly(True)
-        layout.addWidget(self.log_text)
+        queue_section_layout.addWidget(self.log_text)
+        self.queue_section_widget.setVisible(False)
+        layout.addWidget(self.queue_section_widget, 1)
 
         if self.job_queue_service is not None:
             recovered = self.job_queue_service.recover_stale_running_jobs(stale_after_seconds=90)
@@ -5054,27 +4644,16 @@ class ExportTab(QWidget):
                 self.on_job_event(f"[Export] {recovered} job(s) stale recupere(s).")
 
     def refresh_data(self) -> None:
-        current = self.project_combo.currentData()
-        self.project_combo.blockSignals(True)
-        self.project_combo.clear()
-        for project in self.project_service.list_projects():
-            self.project_combo.addItem(f"{project.id} - {project.name}", userData=project.id)
-        if current is not None:
-            idx = self.project_combo.findData(current)
-            if idx >= 0:
-                self.project_combo.setCurrentIndex(idx)
-        self.project_combo.blockSignals(False)
         self._sync_export_context()
         self._load_queue_from_backend()
         self._refresh_queue_view()
 
     def set_selected_project(self, project_id: int) -> None:
-        idx = self.project_combo.findData(project_id)
-        if idx >= 0:
-            self.project_combo.setCurrentIndex(idx)
+        self._selected_project_id = project_id
+        self._sync_export_context()
 
     def _sync_export_context(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             self._set_quality_banner(None)
             return
@@ -5139,7 +4718,7 @@ class ExportTab(QWidget):
         )
 
     def _refresh_quality_banner(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             self._set_quality_banner(None)
             return
@@ -5155,8 +4734,16 @@ class ExportTab(QWidget):
     def _on_min_rating_changed(self, _index: int = -1) -> None:
         self._refresh_quality_banner()
 
+    def _toggle_advanced_queue_controls(self, opened: bool) -> None:
+        self.queue_controls_panel.setVisible(bool(opened))
+        self.queue_controls_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+
+    def _toggle_queue_section(self, opened: bool) -> None:
+        self.queue_section_widget.setVisible(bool(opened))
+        self.queue_section_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+
     def _verify_quality_gate(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             QMessageBox.warning(self, "Checklist", "Selectionne un projet.")
             return
@@ -5172,7 +4759,7 @@ class ExportTab(QWidget):
             QMessageBox.critical(self, "Checklist", str(exc))
 
     def _validate_quality_gate(self) -> None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         if project_id is None:
             QMessageBox.warning(self, "Checklist", "Selectionne un projet.")
             return
@@ -5189,7 +4776,7 @@ class ExportTab(QWidget):
         QMessageBox.information(self, "Checklist", "Checklist projet validee.")
 
     def _build_export_payload(self) -> dict | None:
-        project_id = self.project_combo.currentData()
+        project_id = self._selected_project_id
         destination = self.destination_edit.text().strip()
         if project_id is None:
             QMessageBox.warning(self, "Validation", "Selectionne un projet.")
@@ -5223,7 +4810,7 @@ class ExportTab(QWidget):
 
         return {
             "project_id": int(project_id),
-            "project_label": str(self.project_combo.currentText()),
+            "project_label": str(self._selected_project_id or "N/A"),
             "destination_dir": destination,
             "profiles": profiles,
             "min_rating": safe_min_rating,
@@ -5750,6 +5337,9 @@ class PresetTab(QWidget):
         rollback_btn.clicked.connect(self._rollback)
         action_layout.addWidget(self.version_combo)
         action_layout.addWidget(rollback_btn)
+        self.expert_mode_check = QCheckBox("Mode expert JSON")
+        self.expert_mode_check.toggled.connect(self._set_expert_mode)
+        action_layout.addWidget(self.expert_mode_check)
         action_layout.addStretch(1)
         new_btn = _new_button("Nouveau")
         new_btn.clicked.connect(self._reset_form)
@@ -5772,9 +5362,14 @@ class PresetTab(QWidget):
         json_layout.addWidget(self.config_edit)
         self.config_tabs.addTab(self.form_config_tab, "Formulaire")
         self.config_tabs.addTab(self.json_config_tab, "JSON")
+        self.config_tabs.tabBar().setVisible(False)
+        self.config_tabs.setCurrentIndex(0)
         form_layout.addWidget(self.config_tabs, 1)
 
-        sync_row = QHBoxLayout()
+        self.sync_controls = QWidget()
+        sync_row = QHBoxLayout(self.sync_controls)
+        sync_row.setContentsMargins(0, 0, 0, 0)
+        sync_row.setSpacing(8)
         to_json_btn = _new_button("Formulaire -> JSON")
         to_json_btn.clicked.connect(self._sync_json_from_form)
         to_form_btn = _new_button("JSON -> Formulaire")
@@ -5782,7 +5377,8 @@ class PresetTab(QWidget):
         sync_row.addStretch(1)
         sync_row.addWidget(to_json_btn)
         sync_row.addWidget(to_form_btn)
-        form_layout.addLayout(sync_row)
+        self.sync_controls.setVisible(False)
+        form_layout.addWidget(self.sync_controls)
 
         split.addWidget(form_widget)
 
@@ -5937,13 +5533,24 @@ class PresetTab(QWidget):
         label.setObjectName("CardValue")
         return label
 
+    def _set_expert_mode(self, enabled: bool) -> None:
+        if bool(enabled):
+            self._sync_json_from_form()
+            self.config_tabs.setCurrentIndex(1)
+            self.sync_controls.setVisible(True)
+            self.config_edit.setFocus()
+        else:
+            self.config_tabs.setCurrentIndex(0)
+            self.sync_controls.setVisible(False)
+
     def _reset_form(self) -> None:
         self.current_preset_id = None
         self.name_edit.clear()
         self.associated_projects_label.setText("Projets associes: -")
         self._apply_config_to_form(default_preset_config())
         self._sync_json_from_form()
-        self.config_tabs.setCurrentIndex(0)
+        self.expert_mode_check.setChecked(False)
+        self._set_expert_mode(False)
         self.version_combo.clear()
 
     def _save(self) -> None:
@@ -6152,22 +5759,7 @@ class PresetTab(QWidget):
         delivery_layout.addWidget(self.delivery_report_check)
         delivery_layout.addWidget(self.delivery_contact_sheet_check)
         delivery_layout.addStretch(1)
-
-        help_box = QGroupBox("Aide rapide")
-        help_box.setObjectName("PresetSectionBox")
-        help_layout = QVBoxLayout(help_box)
-        help_layout.setContentsMargins(16, 16, 16, 16)
-        help_label = QLabel("Astuce: utilise Formulaire puis verifie le rendu dans l'onglet JSON.")
-        help_label.setWordWrap(True)
-        help_layout.addWidget(help_label)
-        help_layout.addStretch(1)
-
-        bottom_row = QHBoxLayout()
-        bottom_row.setContentsMargins(0, 0, 0, 0)
-        bottom_row.setSpacing(24)
-        bottom_row.addWidget(delivery_box, 2)
-        bottom_row.addWidget(help_box, 1)
-        layout.addLayout(bottom_row)
+        layout.addWidget(delivery_box)
         layout.addStretch(1)
         scroll.setWidget(container)
         outer_layout.addWidget(scroll)

@@ -34,6 +34,21 @@ class StorageService:
     def get_settings(self) -> dict:
         return load_settings()
 
+    def get_storage_usage(self) -> dict:
+        """Returns dict with 'total_gb', 'used_gb', 'free_gb', 'percent_used' of the storage root."""
+        settings = load_settings()
+        root = Path(settings.get("storage_root", "")).resolve()
+        try:
+            total, used, free = shutil.disk_usage(root)
+            return {
+                "total_gb": total // (2**30),
+                "used_gb": used // (2**30),
+                "free_gb": free // (2**30),
+                "percent_used": int((used / total) * 100) if total > 0 else 0
+            }
+        except Exception:
+            return {"total_gb": 0, "used_gb": 0, "free_gb": 0, "percent_used": 0}
+
     def set_accent_color(self, accent_color: str) -> str:
         normalized = normalize_accent_color(accent_color)
         settings = load_settings()

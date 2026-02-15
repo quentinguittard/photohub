@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -168,6 +169,93 @@ class ProjectService:
                 preset_id=preset_id,
             )
             session.add(project)
+            session.commit()
+            session.refresh(project)
+            return project
+
+    def delete_project(self, project_id: int, delete_files: bool = True) -> None:
+        with self.session_factory() as session:
+            project = session.get(Project, project_id)
+            if project is None:
+                raise ValueError("Projet introuvable.")
+            
+            # Keep path for deletion after commit
+            root_path = Path(project.root_path).resolve()
+            
+            # Delete DB entry (cascades should handle children if configured, 
+            # but usually manual clean up is safer for critical data, here relying on cascading)
+            session.delete(project)
+            session.commit()
+            
+        # Files deletion
+        if delete_files and root_path.exists() and root_path.is_dir():
+            try:
+                # Sanity check: ensure we are not deleting C:\ or similar
+                if len(root_path.parts) < 2:
+                    raise ValueError("Chemin trop court, suppression annulee par securite.")
+                shutil.rmtree(root_path)
+            except Exception as e:
+                # Log but don't fail the operation since DB is clean
+                print(f"Erreur suppression fichiers {root_path}: {e}")
+
+    def update_project(
+        self,
+        project_id: int,
+        name: str | None = None,
+        client_name: str | None = None,
+        shoot_date: date | None = None,
+        preset_id: int | None = None,
+        root_path: str | None = None,
+        status: str | None = None,
+    ) -> Project:
+        with self.session_factory() as session:
+            project = session.get(Project, project_id)
+            if project is None:
+                raise ValueError("Projet introuvable.")
+
+            if name is not None:
+                clean_name = name.strip()
+                if not clean_name:
+                    raise ValueError("Le nom du projet est requis.")
+                project.name = clean_name
+
+            if shoot_date is not None:
+                project.shoot_date = shoot_date
+
+            if preset_id is not None:
+                # If preset_id is -1 or similar check? Assuming valid ID or None
+                # If 0 or None passed, handle
+                if preset_id > 0:
+                    prj_preset = session.get(Preset, preset_id)
+                    if prj_preset:
+                        project.preset_id = preset_id
+                else:
+                    project.preset_id = None
+
+            if root_path is not None:
+                clean_path = root_path.strip()
+                if clean_path:
+                    # Basic check, maybe verify exists? For now just update record
+                    project.root_path = clean_path
+
+            if status is not None:
+                project.status = status
+
+            if client_name is not None:
+                clean_client = client_name.strip()
+                if clean_client:
+                    # Check if client exists or create new
+                    client = session.scalar(
+                        select(Client).where(func.lower(Client.name) == clean_client.lower())
+                    )
+                    if client is None:
+                        client = Client(name=clean_client)
+                        session.add(client)
+                        session.flush()
+                    project.client_id = client.id
+                else:
+                    project.client_id = None
+
             session.commit()
             session.refresh(project)
             return project
