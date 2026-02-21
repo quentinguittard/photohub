@@ -1,53 +1,74 @@
-# PhotoHub
+# PhotoHub ✨
 
-PhotoHub is a cross-platform desktop toolbox for photographers (Windows/macOS), focused on:
+PhotoHub est un outil de flux de travail (workflow) haute performance conçu pour les photographes professionnels. Il centralise l'ingestion, le tri, l'édition rapide et l'exportation multi-format dans une interface moderne et intuitive.
 
-- project hub
-- secure import with checksum
-- quick culling (rating/reject + filters)
-- edit mode with quick controls (exposure, WB, crop, straighten) and advanced controls
-- copy/paste/sync of edit settings across filtered assets
-- presets de projet (CRUD + versioning + rollback)
-- presets editor in both form mode (non-tech) and JSON mode
-- contextual tooltips in preset form for non-technical users
-- multi-profile export (`web`, `print`, `social`)
-- delivery options (ZIP package + export report)
-- contact sheet PDF generation
-- background jobs with progress/cancel for import/export/culling batch
-- export queue with ETA, pause/resume, retry failed jobs
-- simple preset model: create a preset, then assign it to a project
-- Sprint UI-1 shell: Fluent-inspired navigation, top bar context, dashboard, jobs center
+## 🚀 Fonctionnalités Clés
 
-## Quick start
+### 📁 Gestion de Projet & Ingestion
+- **Hub Centralisé** : Gérez tous vos shootings depuis une vue unique.
+- **Importation Sécurisée** : Ingestion avec vérification d'intégrité (checksum).
+- **Structure Flexible** : Support du stockage global configurable et des dossiers par projet.
+
+### 🎯 Tri & Sélection (Culling)
+- **Tri Ultra-Rapide** : Navigation fluide avec préchargement des images.
+- **Notation & Rejet** : Systèmes de notes (1-5★) et drapeaux (P/X) avec raccourcis clavier.
+- **Filtres Avancés** : Filtrez par note, statut ou type de fichier instantanément.
+
+### 🎨 Édition & Post-Traitement Rapide
+- **Ajustements Non-Destructifs** : Exposition, balance des blancs, contraste, saturation, etc.
+- **Correction Géométrique** : Recadrage et redressement de l'horizon.
+- **Synchronisation en Lot** : Copiez-collez ou synchronisez vos réglages sur des centaines d'images.
+- **Aperçu Avant/Après** : Comparez vos modifications en temps réel.
+
+### 📦 Exportation & Livraison
+- **Profils Multiples** : Exportez simultanément pour le `web`, l' `impression` et les `réseaux sociaux`.
+- **Marquage (Watermark)** : Système de filigrane dynamique par presets.
+- **Packaging de Livraison** : Génération automatisée de fichiers ZIP et rapports d'exportation.
+- **Planches de Contact** : Génération de PDF professionnels pour vos clients.
+
+## 💎 Identité Visuelle & Personnalisation
+
+PhotoHub s'adapte à votre studio :
+- **Dashboard Premium** : Tableau de bord de type "Bento Box" avec KPIs en temps réel.
+- **Bannière Personnalisée** : Ajoutez votre propre bannière (avec recadrage intelligent) pour un accueil qui vous ressemble.
+- **Couleur d'Accentuation** : Personnalisez l'interface aux couleurs de votre marque.
+- **Profil Studio** : Signature automatique des métadonnées et avis de copyright.
+
+## 🛠️ Automatisation & Performance
+- **Système de Presets** : Presets de renommage, d'importation, d'exportation et de watermark versionnés.
+- **Patterns de Nommage** : Moteur puissant utilisant des tags (`{project}`, `{date}`, `{seq:04d}`, `{orig}`) pour des fichiers parfaitement organisés.
+- **Files d'Attente (Jobs)** : Gestionnaire de tâches en arrière-plan avec barre de progression globale et centre de suivi.
+- **Surveillance Disque** : Monitoring en temps réel de l'espace de stockage avec alertes visuelles.
+
+## 💻 Installation Rapide
 
 ```bash
+# Initialiser l'environnement
 python -m venv .venv
 .venv\Scripts\activate
+
+# Installer en mode développement
 pip install -e .
+
+# Lancer l'application
 photohub
 ```
 
-Optional Fluent UI (PySide6 build):
-
+*Optionnel : Pour l'interface Fluent (Windows) :*
 ```bash
 pip install -e ".[fluent]"
 ```
 
-If Fluent is enabled but the installed `qfluentwidgets` package is a `PyQt5` build,
-PhotoHub now auto-disables Fluent mode to avoid startup crashes.
+## ⌨️ Raccourcis Principaux
 
-## Notes
+| Module | Action | Raccourci |
+|--------|--------|-----------|
+| **Tri** | Notation | `0` .. `5` |
+| **Tri** | Garder / Rejeter | `P` / `X` |
+| **Tri** | Navigation | `<-` / `->` |
+| **Édition** | Copier / Coller réglages | `Ctrl+C` / `Ctrl+V` |
+| **Édition** | Synchroniser sélection | `Shift+S` |
+| **Édition** | Avant / Après | `Y` |
 
-- Local data and SQLite DB are stored in an OS-specific application directory:
-  - Windows: `%APPDATA%\PhotoHub`
-  - macOS: `~/Library/Application Support/PhotoHub`
-- Project assets are copied into project folders under `projects/` in that app data directory.
-- You can change the global storage location in the `Settings` tab.
-- You can also set a custom parent folder per project in `Hub Projets`.
-- Culling shortcuts in `Tri`: keys `0..5` rating, `P` keep, `X` reject, `R` toggle reject, `Left/Right` previous/next, `Space` next, `F` focus mode.
-- Edit shortcuts in `Edit`: `Ctrl+C` copy settings, `Ctrl+V` paste settings, `Ctrl+S` apply, `Shift+S` sync to filtered assets, `Y` before/after.
-- In `Export`, you can generate a delivery ZIP and a `.txt` report.
-- In `Export`, you can also generate a contact sheet PDF.
-- In `Hub Projets`, you can change the status of the selected project manually.
-- Project status transitions are controlled to avoid inconsistent workflow jumps.
-- In `Presets`, each preset now shows which project(s) currently use it.
+---
+*PhotoHub — Développé pour la performance et le confort des photographes.*
