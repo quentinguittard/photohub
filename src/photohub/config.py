@@ -74,6 +74,7 @@ def _default_settings() -> dict:
         "last_migration_error": None,
         "accent_color": DEFAULT_ACCENT_COLOR,
         "studio_profile": dict(DEFAULT_STUDIO_PROFILE),
+        "dashboard_banner": None,
     }
 
 
@@ -126,6 +127,7 @@ def load_settings() -> dict:
             changed = True
         merged["last_migration_error"] = normalized_error
 
+    merged["dashboard_banner"] = payload.get("dashboard_banner")
     if changed:
         save_settings(merged)
     return merged
@@ -157,6 +159,7 @@ def resolve_app_paths() -> AppPaths:
         "last_migration_error": settings.get("last_migration_error"),
         "accent_color": normalize_accent_color(settings.get("accent_color")),
         "studio_profile": normalize_studio_profile(settings.get("studio_profile")),
+        "dashboard_banner": settings.get("dashboard_banner"),
     }
     save_settings(normalized)
 

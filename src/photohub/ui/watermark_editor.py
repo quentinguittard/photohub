@@ -10,20 +10,27 @@ from PySide6.QtWidgets import (
     QColorDialog,
     QComboBox,
     QDialog,
-    QDoubleSpinBox,
     QFileDialog,
-    QFormLayout,
+    QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QToolButton,
+    QMenu,
+    QButtonGroup,
 )
+from PySide6.QtGui import QAction, QFontDatabase
+from .components import BentoCard
 
 from ..services.watermark_assets import import_logo, resolve_logo_asset_path
 from ..services.watermarks import ANCHOR_ORDER, VARIABLE_CATALOG, normalize_watermark_config, render_template
@@ -52,6 +59,36 @@ def _normalize_hex(value: str, fallback: str) -> str:
     if not all(ch in "0123456789ABCDEF" for ch in raw[1:]):
         return fallback
     return raw
+
+
+def _adjust_color(hex_color: str, amount: int) -> str:
+    """amount > 100 is lighter, < 100 is darker"""
+    color = QColor(hex_color)
+    if not color.isValid():
+        return hex_color
+    if amount > 100:
+        return color.lighter(amount).name().upper()
+    else:
+        return color.darker(200 - amount).name().upper()
+
+
+def _rgba(hex_color: str, alpha: int) -> str:
+    c = QColor(hex_color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
+
+
+def _get_contrast_color(hex_color: str) -> str:
+    """Returns #FFFFFF or #000000 based on brightness of hex_color"""
+    c = QColor(hex_color)
+    luma = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+    return "#000000" if luma > 150 else "#FFFFFF"
+
+
+def _map_font_family(family: str) -> str:
+    f = family.lower()
+    if "serif" in f: return "Times New Roman"
+    if "mono" in f: return "Consolas"
+    return "Segoe UI"
 
 
 def _anchored(canvas_w: int, canvas_h: int, layer_w: float, layer_h: float, anchor: str, ox: float, oy: float) -> tuple[float, float]:
@@ -176,7 +213,8 @@ class WatermarkPreview(QWidget):
         text = render_template(str(cfg.get("template", "")), self._context)
         if not text:
             return None
-        font = QFont(str(cfg.get("font_family", "Sans")))
+        font_family = _map_font_family(str(cfg.get("font_family", "Sans")))
+        font = QFont(font_family)
         font.setBold(bool(cfg.get("bold", False)))
         font.setItalic(bool(cfg.get("italic", False)))
         font.setPixelSize(max(8, int(round(w * (float(cfg.get("size_pct", 4.0)) / 100.0)))))
@@ -258,188 +296,421 @@ class WatermarkPreview(QWidget):
 
 
 class WatermarkEditorDialog(QDialog):
-    def __init__(self, *, config: dict, app_data_dir: Path, parent=None) -> None:
+    def __init__(self, *, config: dict, app_data_dir: Path, accent_color: str = "#10B981", parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Editeur Watermark")
-        self.resize(1120, 720)
+        self.setWindowTitle("Configuration de la Signature Visuelle")
+        self.resize(1150, 750)
         self._app_data_dir = Path(app_data_dir)
         self._cfg = normalize_watermark_config(config)
+        self._accent = _normalize_hex(accent_color, "#10B981")
         self._active = "text"
         self._loading = False
         self._ctx = {k: f"{label}" for k, label in VARIABLE_CATALOG}
         self._ctx.update({"shoot_date": "2026-02-14", "export_date": "2026-02-14", "rating_min": "0"})
 
-        root = QVBoxLayout(self)
-        header = QHBoxLayout()
-        self.enabled_check = QCheckBox("Activer watermark")
-        self.enabled_check.setChecked(bool(self._cfg.get("enabled", False)))
-        self.enabled_check.toggled.connect(lambda v: self._set_global_enabled(v))
-        pick_preview = QPushButton("Charger image preview")
-        pick_preview.clicked.connect(self._pick_preview)
-        reset_preview = QPushButton("Placeholder")
-        reset_preview.clicked.connect(lambda: self.preview.set_preview_image(None))
-        header.addWidget(self.enabled_check)
-        header.addStretch(1)
-        header.addWidget(pick_preview)
-        header.addWidget(reset_preview)
-        root.addLayout(header)
+        # Derive colors
+        accent_hover = _adjust_color(self._accent, 115)
+        accent_text = _get_contrast_color(self._accent)
+        
+        self.setStyleSheet(f"""
+            QDialog {{ background-color: #121212; }}
+            QLabel {{ color: #E8E8E8; font-size: 11px; font-weight: 500; }}
+            QLabel#Muted {{ color: #7A7A7A; font-size: 10px; }}
+            
+            /* Sidebar and Cards */
+            QFrame#SettingsSidebar {{ 
+                background-color: #1A1A1A; 
+                border-left: 1px solid #333; 
+            }}
+            
+            /* Inputs */
+            QLineEdit, QSpinBox, QComboBox {{
+                background: #121212;
+                border: 1px solid #333;
+                border-radius: 4px;
+                padding: 6px;
+                color: #E8E8E8;
+            }}
+            QLineEdit:focus {{ border-color: #555; }}
+            QLineEdit#PathDisplay {{
+                background: #0F0F0F;
+                border: 1px dashed #333;
+                color: #B2B2B2;
+                font-size: 10px;
+                padding: 4px 8px;
+            }}
+            
+            /* Buttons */
+            QPushButton {{
+                background: #2D2D2D;
+                border: 1px solid #3A3A3A;
+                border-radius: 6px;
+                padding: 8px 12px;
+                color: #E8E8E8;
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{ background: #353535; border-color: #545454; }}
+            QPushButton#Primary {{ background: {self._accent}; border: none; color: {accent_text}; }}
+            QPushButton#Primary:hover {{ background: {accent_hover}; }}
+            
+            /* Common Variable Chips */
+            QPushButton#VarChip {{
+                background: #242424;
+                border: 1px solid #333;
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: #B2B2B2;
+                font-size: 9px;
+                font-weight: 700;
+                text-transform: uppercase;
+            }}
+            QPushButton#VarChip:hover {{ background: #2D2D2D; border-color: #555; coloe: #E8E8E8; }}
+            
+            /* Style Toggle Buttons */
+            QToolButton#ModeBtn {{
+                background: #242424;
+                border: 1px solid #333;
+                padding: 10px;
+                border-radius: 8px;
+                color: #B2B2B2;
+                font-weight: 700;
+                font-size: 11px;
+            }}
+            QToolButton#ModeBtn:checked {{
+                background: {self._accent};
+                border-color: {self._accent};
+                color: {accent_text};
+            }}
+            
+            /* Anchor Buttons Grid */
+            QToolButton#AnchorBtn {{
+                background: #121212;
+                border: 1px solid #333;
+                border-radius: 4px;
+                width: 28px;
+                height: 28px;
+            }}
+            QToolButton#AnchorBtn:hover {{ background: #222; }}
+            QToolButton#AnchorBtn:checked {{ background: {self._accent}; border-color: {self._accent}; }}
 
-        content = QHBoxLayout()
+            /* Sliders */
+            QSlider::groove:horizontal {{
+                height: 4px;
+                background: #121212;
+                border: 1px solid #333;
+                border-radius: 2px;
+            }}
+            QSlider::handle:horizontal {{
+                background: #E8E8E8;
+                border: 1px solid #333;
+                width: 14px;
+                height: 14px;
+                margin: -6px 0;
+                border-radius: 7px;
+            }}
+            QSlider::sub-page:horizontal {{ background: {self._accent}; border-radius: 2px; }}
+        """)
+
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ── 1. PREVIEW PANEL (Left) ──
+        preview_panel = QWidget()
+        preview_v = QVBoxLayout(preview_panel)
+        preview_v.setContentsMargins(40, 40, 40, 40)
+        preview_v.setSpacing(30)
+
+        nav = QHBoxLayout()
+        self.enabled_check = QCheckBox("Activer le marquage visuel")
+        self.enabled_check.setStyleSheet("font-size: 14px; font-weight: 600; color: #10B981;")
+        self.enabled_check.setChecked(bool(self._cfg.get("enabled", False)))
+        self.enabled_check.toggled.connect(self._set_global_enabled)
+        nav.addWidget(self.enabled_check)
+        nav.addStretch(1)
+        
+        pick_img = QPushButton("Changer l'image de test")
+        pick_img.clicked.connect(self._pick_preview)
+        nav.addWidget(pick_img)
+        preview_v.addLayout(nav)
+
         self.preview = WatermarkPreview(config=self._cfg, app_data_dir=self._app_data_dir, context=self._ctx)
         self.preview.offsetsDragged.connect(self._on_drag_offsets)
-        content.addWidget(self.preview, 3)
+        preview_v.addWidget(self.preview, 1)
+        
+        hint = QLabel("💡 Astuce : Glissez le texte ou le logo à la souris pour ajuster la position librement.")
+        hint.setObjectName("Muted")
+        preview_v.addWidget(hint)
+        
+        main_layout.addWidget(preview_panel, 1)
 
-        right = QVBoxLayout()
-        layer_box = QGroupBox("Calque")
-        form = QFormLayout(layer_box)
-        self.layer_combo = QComboBox()
-        self.layer_combo.addItem("Texte", userData="text")
-        self.layer_combo.addItem("Logo", userData="logo")
-        self.layer_combo.currentIndexChanged.connect(self._on_layer_changed)
-        self.layer_enabled = QCheckBox("Actif")
-        self.layer_enabled.toggled.connect(lambda v: self._set_layer("enabled", bool(v)))
-        self.anchor_combo = QComboBox()
-        for key in ANCHOR_ORDER:
-            self.anchor_combo.addItem(ANCHOR_LABELS.get(key, key), userData=key)
-        self.anchor_combo.currentIndexChanged.connect(lambda: self._set_layer("anchor", str(self.anchor_combo.currentData() or "center")))
-        self.offset_x = QDoubleSpinBox(); self.offset_x.setRange(-100, 100); self.offset_x.setSuffix("%"); self.offset_x.valueChanged.connect(lambda _v: self._set_offsets())
-        self.offset_y = QDoubleSpinBox(); self.offset_y.setRange(-100, 100); self.offset_y.setSuffix("%"); self.offset_y.valueChanged.connect(lambda _v: self._set_offsets())
-        self.size_pct = QDoubleSpinBox(); self.size_pct.setRange(0.5, 100); self.size_pct.setSuffix("%"); self.size_pct.valueChanged.connect(lambda v: self._set_layer("size_pct", float(v)))
-        self.angle = QDoubleSpinBox(); self.angle.setRange(-180, 180); self.angle.setSuffix(" deg"); self.angle.valueChanged.connect(lambda v: self._set_layer("angle_deg", float(v)))
-        self.opacity = QSlider(Qt.Orientation.Horizontal); self.opacity.setRange(0, 100); self.opacity.valueChanged.connect(self._on_opacity)
-        self.opacity_label = QLabel("70%")
-        op_row = QHBoxLayout(); op_row.addWidget(self.opacity, 1); op_row.addWidget(self.opacity_label)
-        form.addRow("Type", self.layer_combo); form.addRow("", self.layer_enabled); form.addRow("Ancre", self.anchor_combo)
-        form.addRow("Offset X", self.offset_x); form.addRow("Offset Y", self.offset_y); form.addRow("Taille", self.size_pct); form.addRow("Angle", self.angle); form.addRow("Opacite", op_row)
-        right.addWidget(layer_box)
+        # ── 2. SETTINGS SIDEBAR (Right) ──
+        sidebar = QFrame()
+        sidebar.setObjectName("SettingsSidebar")
+        sidebar.setFixedWidth(380)
+        side_v = QVBoxLayout(sidebar)
+        side_v.setContentsMargins(24, 24, 24, 24)
+        side_v.setSpacing(20)
 
-        self.text_box = QGroupBox("Texte")
-        t = QFormLayout(self.text_box)
-        self.template_edit = QLineEdit(); self.template_edit.textChanged.connect(lambda v: self._set_text("template", str(v)))
-        self.font_family = QComboBox(); self.font_family.addItems(["Sans", "Serif", "Monospace"]); self.font_family.currentIndexChanged.connect(lambda: self._set_text("font_family", self.font_family.currentText()))
-        self.bold = QCheckBox("Gras"); self.bold.toggled.connect(lambda v: self._set_text("bold", bool(v)))
-        self.italic = QCheckBox("Italique"); self.italic.toggled.connect(lambda v: self._set_text("italic", bool(v)))
-        self.text_color = QLineEdit(); self.text_color.editingFinished.connect(lambda: self._set_text_color())
-        pick_text_color = QPushButton("Couleur texte"); pick_text_color.clicked.connect(self._pick_text_color)
-        self.stroke_on = QCheckBox("Contour"); self.stroke_on.toggled.connect(lambda v: self._set_text("stroke_enabled", bool(v)))
-        self.stroke_color = QLineEdit(); self.stroke_color.editingFinished.connect(lambda: self._set_stroke_color())
-        pick_stroke = QPushButton("Couleur contour"); pick_stroke.clicked.connect(self._pick_stroke_color)
-        self.stroke_width = QSpinBox(); self.stroke_width.setRange(0, 24); self.stroke_width.valueChanged.connect(lambda v: self._set_text("stroke_width_px", int(v)))
-        var_row = QHBoxLayout(); self.var_combo = QComboBox(); [self.var_combo.addItem(f"{label} ({key})", userData=key) for key, label in VARIABLE_CATALOG]
-        ins = QPushButton("Inserer variable"); ins.clicked.connect(self._insert_variable); var_row.addWidget(self.var_combo, 1); var_row.addWidget(ins)
-        t.addRow("Template", self.template_edit); t.addRow("Font", self.font_family); t.addRow("", self.bold); t.addRow("", self.italic)
-        t.addRow("Couleur", self.text_color); t.addRow("", pick_text_color); t.addRow("", self.stroke_on); t.addRow("Contour", self.stroke_color); t.addRow("", pick_stroke); t.addRow("Epaisseur", self.stroke_width); t.addRow("Variables", var_row)
-        right.addWidget(self.text_box)
+        # Mode Selector
+        mode_box = QHBoxLayout()
+        self.btn_text = QToolButton(); self.btn_text.setText("TEXTE"); self.btn_text.setCheckable(True); self.btn_text.setChecked(True)
+        self.btn_logo = QToolButton(); self.btn_logo.setText("LOGO"); self.btn_logo.setCheckable(True)
+        self.btn_text.setObjectName("ModeBtn"); self.btn_logo.setObjectName("ModeBtn")
+        self.btn_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred); self.btn_logo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.btn_text); self.mode_group.addButton(self.btn_logo)
+        self.mode_group.buttonClicked.connect(self._on_mode_switched)
+        mode_box.addWidget(self.btn_text); mode_box.addWidget(self.btn_logo)
+        side_v.addLayout(mode_box)
 
-        self.logo_box = QGroupBox("Logo")
-        lf = QFormLayout(self.logo_box)
-        self.logo_asset = QLineEdit(); self.logo_asset.setReadOnly(True)
-        pick_logo = QPushButton("Importer logo"); pick_logo.clicked.connect(self._pick_logo)
-        lf.addRow("Asset", self.logo_asset); lf.addRow("", pick_logo)
-        right.addWidget(self.logo_box)
-        right.addStretch(1)
-        content.addLayout(right, 2)
-        root.addLayout(content, 1)
+        # Content Card
+        self.content_card = BentoCard("Personnalisation")
+        self.content_stack = QStackedWidget()
+        
+        # - Text Layout
+        self.text_widget = QWidget()
+        text_v = QVBoxLayout(self.text_widget); text_v.setContentsMargins(0, 0, 0, 0); text_v.setSpacing(12)
+        text_v.addWidget(QLabel("TEXTE & VARIABLES"))
+        self.template_edit = QLineEdit()
+        self.template_edit.setPlaceholderText("ex: © {photographer}")
+        self.template_edit.textChanged.connect(lambda v: self._set_text("template", str(v)))
+        text_v.addWidget(self.template_edit)
+        
+        # Quick Chips
+        chips_layout = QHBoxLayout(); chips_layout.setSpacing(4)
+        for key in ["project_name", "photographer", "shoot_date", "seq"]:
+            chip = QPushButton(key.replace("_", " ")); chip.setObjectName("VarChip")
+            chip.clicked.connect(lambda _=False, k=key: self._insert_variable_key(k))
+            chips_layout.addWidget(chip)
+        chips_layout.addStretch(1)
+        text_v.addLayout(chips_layout)
+        
+        style_row = QHBoxLayout()
+        self.font_combo = QComboBox(); self.font_combo.addItems(["Sans", "Serif", "Monospace"]); self.font_combo.currentIndexChanged.connect(self._on_font_changed)
+        self.color_btn = QPushButton("Couleur..."); self.color_btn.clicked.connect(self._pick_text_color)
+        style_row.addWidget(self.font_combo, 2); style_row.addWidget(self.color_btn, 1)
+        text_v.addLayout(style_row)
+        self.content_stack.addWidget(self.text_widget)
+        
+        # - Logo Layout
+        self.logo_widget = QWidget()
+        logo_v = QVBoxLayout(self.logo_widget); logo_v.setContentsMargins(0, 0, 0, 0); logo_v.setSpacing(12)
+        logo_v.addWidget(QLabel("SOURCE DE L'IMAGE"))
+        
+        path_box = QVBoxLayout(); path_box.setSpacing(4)
+        self.logo_path_edit = QLineEdit()
+        self.logo_path_edit.setObjectName("PathDisplay")
+        self.logo_path_edit.setReadOnly(True)
+        self.logo_path_edit.setPlaceholderText("Aucun fichier sélectionné")
+        path_box.addWidget(self.logo_path_edit)
+        
+        btns = QHBoxLayout(); btns.setSpacing(8)
+        pick_logo = QPushButton("Parcourir..."); pick_logo.setObjectName("Primary"); pick_logo.clicked.connect(self._pick_logo)
+        remove_logo = QPushButton("Supprimer"); remove_logo.clicked.connect(self._remove_logo)
+        btns.addWidget(pick_logo, 2); btns.addWidget(remove_logo, 1)
+        
+        logo_v.addLayout(path_box); logo_v.addLayout(btns)
+        self.content_stack.addWidget(self.logo_widget)
+        
+        self.content_card.content_layout.addWidget(self.content_stack)
+        side_v.addWidget(self.content_card)
 
-        footer = QHBoxLayout(); footer.addStretch(1)
-        cancel_btn = QPushButton("Annuler"); cancel_btn.clicked.connect(self.reject)
-        ok_btn = QPushButton("Valider"); ok_btn.clicked.connect(self.accept)
-        footer.addWidget(cancel_btn); footer.addWidget(ok_btn)
-        root.addLayout(footer)
+        # Appearance Card
+        self.app_card = BentoCard("Apparence")
+        app_v = QVBoxLayout()
+        
+        # Scale
+        s_row = QHBoxLayout(); s_row.addWidget(QLabel("Taille:"))
+        self.scale_slider = QSlider(Qt.Orientation.Horizontal); self.scale_slider.setRange(2, 100)
+        self.scale_slider.valueChanged.connect(self._on_scale_changed)
+        self.scale_val = QLabel("10%"); self.scale_val.setFixedWidth(30)
+        s_row.addWidget(self.scale_slider); s_row.addWidget(self.scale_val)
+        app_v.addLayout(s_row)
+        
+        # Opacity
+        o_row = QHBoxLayout(); o_row.addWidget(QLabel("Opacité:"))
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal); self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        self.opacity_val = QLabel("70%"); self.opacity_val.setFixedWidth(30)
+        o_row.addWidget(self.opacity_slider); o_row.addWidget(self.opacity_val)
+        app_v.addLayout(o_row)
+        
+        self.app_card.content_layout.addLayout(app_v)
+        side_v.addWidget(self.app_card)
+
+        # Position Card
+        self.pos_card = BentoCard("Positionnement")
+        pos_v = QVBoxLayout()
+        
+        # Anchor Grid
+        grid_container = QHBoxLayout()
+        grid = QGridLayout(); grid.setSpacing(4)
+        self.anchor_btns: dict[str, QToolButton] = {}
+        positions = [
+            ("top_left", 0, 0), ("top_center", 0, 1), ("top_right", 0, 2),
+            ("center_left", 1, 0), ("center", 1, 1), ("center_right", 1, 2),
+            ("bottom_left", 2, 0), ("bottom_center", 2, 1), ("bottom_right", 2, 2)
+        ]
+        self.anchor_group = QButtonGroup(self)
+        for key, r, c in positions:
+            btn = QToolButton(); btn.setObjectName("AnchorBtn"); btn.setCheckable(True)
+            self.anchor_btns[key] = btn; self.anchor_group.addButton(btn)
+            grid.addWidget(btn, r, c)
+        self.anchor_group.buttonClicked.connect(self._on_anchor_btn_clicked)
+        grid_container.addLayout(grid); grid_container.addStretch(1)
+        
+        # Precision offsets
+        off_box = QVBoxLayout(); off_box.setSpacing(4)
+        self.spin_x = QSpinBox(); self.spin_x.setRange(-100, 100); self.spin_x.setSuffix("%")
+        self.spin_y = QSpinBox(); self.spin_y.setRange(-100, 100); self.spin_y.setSuffix("%")
+        self.spin_x.valueChanged.connect(self._on_offsets_changed)
+        self.spin_y.valueChanged.connect(self._on_offsets_changed)
+        off_box.addWidget(QLabel("OFFSET X")); off_box.addWidget(self.spin_x)
+        off_box.addWidget(QLabel("OFFSET Y")); off_box.addWidget(self.spin_y)
+        grid_container.addLayout(off_box)
+        
+        pos_v.addLayout(grid_container)
+        self.pos_card.content_layout.addLayout(pos_v)
+        side_v.addWidget(self.pos_card)
+
+        side_v.addStretch(1)
+
+        # Final Actions
+        foot = QHBoxLayout()
+        can = QPushButton("Annuler"); can.clicked.connect(self.reject)
+        ok = QPushButton("Enregistrer la Signature"); ok.setObjectName("Primary"); ok.clicked.connect(self.accept)
+        foot.addWidget(can); foot.addWidget(ok)
+        side_v.addLayout(foot)
+
+        main_layout.addWidget(sidebar)
         self._load_controls()
+
+    def _create_header(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setObjectName("SectionHeader")
+        return lbl
 
     def get_config(self) -> dict:
         return normalize_watermark_config(self._cfg)
 
-    def _set_global_enabled(self, value: bool) -> None:
-        self._cfg["enabled"] = bool(value); self.preview.set_config(self._cfg)
-
-    def _on_layer_changed(self) -> None:
-        self._active = str(self.layer_combo.currentData() or "text"); self._load_controls()
-
-    def _set_layer(self, key: str, value) -> None:
-        if self._loading:
-            return
-        self._cfg[self._active][key] = value
-        self.preview.set_active_layer(self._active)
+    def _set_global_enabled(self, val: bool) -> None:
+        self._cfg["enabled"] = bool(val)
         self.preview.set_config(self._cfg)
 
-    def _set_offsets(self) -> None:
-        self._set_layer("offset_x_pct", float(self.offset_x.value())); self._set_layer("offset_y_pct", float(self.offset_y.value()))
+    def _on_mode_switched(self, btn: QToolButton) -> None:
+        self._active = "logo" if btn == self.btn_logo else "text"
+        self._load_controls()
 
-    def _on_opacity(self, value: int) -> None:
-        self.opacity_label.setText(f"{int(value)}%"); self._set_layer("opacity", int(value))
+    def _on_scale_changed(self, val: int) -> None:
+        if self._loading: return
+        self.scale_val.setText(f"{val}%")
+        self._cfg[self._active]["size_pct"] = float(val)
+        self.preview.set_config(self._cfg)
 
-    def _set_text(self, key: str, value) -> None:
-        if self._loading:
-            return
-        self._cfg["text"][key] = value; self.preview.set_config(self._cfg)
+    def _on_opacity_changed(self, val: int) -> None:
+        if self._loading: return
+        self.opacity_val.setText(f"{val}%")
+        self._cfg[self._active]["opacity"] = int(val)
+        self.preview.set_config(self._cfg)
 
-    def _set_text_color(self) -> None:
-        self._cfg["text"]["color_hex"] = _normalize_hex(self.text_color.text(), "#FFFFFF"); self.text_color.setText(self._cfg["text"]["color_hex"]); self.preview.set_config(self._cfg)
+    def _on_anchor_btn_clicked(self, btn: QToolButton) -> None:
+        if self._loading: return
+        for k, b in self.anchor_btns.items():
+            if b == btn:
+                self._cfg[self._active]["anchor"] = k
+                break
+        self.preview.set_config(self._cfg)
 
-    def _set_stroke_color(self) -> None:
-        self._cfg["text"]["stroke_color_hex"] = _normalize_hex(self.stroke_color.text(), "#000000"); self.stroke_color.setText(self._cfg["text"]["stroke_color_hex"]); self.preview.set_config(self._cfg)
-
-    def _pick_text_color(self) -> None:
-        color = QColorDialog.getColor(QColor(_normalize_hex(self.text_color.text(), "#FFFFFF")), self, "Couleur texte")
-        if color.isValid():
-            self.text_color.setText(color.name().upper()); self._set_text_color()
-
-    def _pick_stroke_color(self) -> None:
-        color = QColorDialog.getColor(QColor(_normalize_hex(self.stroke_color.text(), "#000000")), self, "Couleur contour")
-        if color.isValid():
-            self.stroke_color.setText(color.name().upper()); self._set_stroke_color()
-
-    def _insert_variable(self) -> None:
-        key = str(self.var_combo.currentData() or "").strip()
-        token = f"{{{{{key}}}}}"
-        cur = self.template_edit.cursorPosition(); txt = self.template_edit.text()
-        self.template_edit.setText(txt[:cur] + token + txt[cur:]); self.template_edit.setCursorPosition(cur + len(token))
-
-    def _pick_logo(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Selectionner logo", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)")
-        if not path:
-            return
-        try:
-            rel = import_logo(path, self._app_data_dir)
-        except Exception as exc:
-            QMessageBox.critical(self, "Erreur logo", str(exc))
-            return
-        self._cfg["logo"]["asset_rel_path"] = rel; self.logo_asset.setText(rel); self.preview.set_config(self._cfg)
-
-    def _pick_preview(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Selectionner image preview", "", "Images (*.png *.jpg *.jpeg *.webp *.bmp *.tif *.tiff)")
-        if path:
-            self.preview.set_preview_image(path)
+    def _on_offsets_changed(self) -> None:
+        if self._loading: return
+        self._cfg[self._active]["offset_x_pct"] = float(self.spin_x.value())
+        self._cfg[self._active]["offset_y_pct"] = float(self.spin_y.value())
+        self.preview.set_config(self._cfg)
 
     def _on_drag_offsets(self, x: float, y: float) -> None:
         self._loading = True
         try:
-            self.offset_x.setValue(float(x)); self.offset_y.setValue(float(y))
+            self.spin_x.setValue(int(round(x))); self.spin_y.setValue(int(round(y)))
         finally:
             self._loading = False
-        self._set_offsets()
+        self._on_offsets_changed()
+
+    def _set_text(self, k: str, v: any) -> None:
+        if self._loading: return
+        self._cfg["text"][k] = v
+        self.preview.set_config(self._cfg)
+
+    def _on_font_changed(self) -> None:
+        if self._loading: return
+        self._set_text("font_family", self.font_combo.currentText())
+
+    def _pick_text_color(self) -> None:
+        curr = QColor(_normalize_hex(str(self._cfg["text"]["color_hex"]), "#FFFFFF"))
+        color = QColorDialog.getColor(curr, self, "Couleur du texte")
+        if color.isValid():
+            self._set_text("color_hex", color.name().upper())
+
+    def _insert_variable_key(self, key: str) -> None:
+        tk = f"{{{{{key}}}}}"
+        cur = self.template_edit.cursorPosition(); txt = self.template_edit.text()
+        self.template_edit.setText(txt[:cur] + tk + txt[cur:])
+        self.template_edit.setCursorPosition(cur + len(tk))
+
+    def _pick_logo(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Image Logo", "", "Images (*.png *.jpg *.jpeg *.webp)")
+        if not path: return
+        try:
+            rel = import_logo(path, self._app_data_dir)
+            self._cfg["logo"]["asset_rel_path"] = rel
+            self._cfg["logo"]["enabled"] = True
+            self.logo_path_edit.setText(rel)
+            self.logo_path_edit.setToolTip(rel)
+            self.preview.set_config(self._cfg)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur", str(exc))
+
+    def _remove_logo(self) -> None:
+        self._cfg["logo"]["asset_rel_path"] = ""
+        self._cfg["logo"]["enabled"] = False
+        self.logo_path_edit.setText("Aucun logo chargé")
+        self.logo_path_edit.setToolTip("")
+        self.preview.set_config(self._cfg)
+
+    def _pick_preview(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Image Aperçu", "", "Images (*.png *.jpg *.jpeg *.webp)")
+        if path: self.preview.set_preview_image(path)
 
     def _load_controls(self) -> None:
         self._loading = True
         try:
-            self.enabled_check.setChecked(bool(self._cfg.get("enabled", False)))
+            cfg = self._cfg.get(self._active, {})
+            self.btn_text.setChecked(self._active == "text")
+            self.btn_logo.setChecked(self._active == "logo")
+            self.content_stack.setCurrentIndex(1 if self._active == "logo" else 0)
+
+            self.scale_slider.setValue(int(float(cfg.get("size_pct", 4.0))))
+            self.scale_val.setText(f"{self.scale_slider.value()}%")
+            self.opacity_slider.setValue(int(float(cfg.get("opacity", 70))))
+            self.opacity_val.setText(f"{self.opacity_slider.value()}%")
+            
+            anchor = str(cfg.get("anchor", "center"))
+            if anchor in self.anchor_btns: self.anchor_btns[anchor].setChecked(True)
+            self.spin_x.setValue(int(float(cfg.get("offset_x_pct", 0.0))))
+            self.spin_y.setValue(int(float(cfg.get("offset_y_pct", 0.0))))
+            
+            if self._active == "text":
+                self.template_edit.setText(str(cfg.get("template", "")))
+                font_idx = self.font_combo.findText(str(cfg.get("font_family", "Sans")))
+                self.font_combo.setCurrentIndex(max(0, font_idx))
+            else:
+                p = str(cfg.get("asset_rel_path", ""))
+                self.logo_path_edit.setText(p or "Aucun logo chargé")
+                self.logo_path_edit.setToolTip(p)
+            
             self.preview.set_active_layer(self._active)
             self.preview.set_config(self._cfg)
-            layer = self._cfg.get(self._active, {})
-            self.layer_enabled.setChecked(bool(layer.get("enabled", False)))
-            i = self.anchor_combo.findData(str(layer.get("anchor", "center"))); self.anchor_combo.setCurrentIndex(max(0, i))
-            self.offset_x.setValue(float(layer.get("offset_x_pct", 0.0))); self.offset_y.setValue(float(layer.get("offset_y_pct", 0.0)))
-            self.size_pct.setValue(float(layer.get("size_pct", 4.0))); self.angle.setValue(float(layer.get("angle_deg", 0.0))); self.opacity.setValue(int(float(layer.get("opacity", 70))))
-            self.opacity_label.setText(f"{self.opacity.value()}%")
-            text = self._cfg.get("text", {})
-            self.template_edit.setText(str(text.get("template", "")))
-            idx_font = self.font_family.findText(str(text.get("font_family", "Sans"))); self.font_family.setCurrentIndex(max(0, idx_font))
-            self.bold.setChecked(bool(text.get("bold", False))); self.italic.setChecked(bool(text.get("italic", False)))
-            self.text_color.setText(_normalize_hex(str(text.get("color_hex", "#FFFFFF")), "#FFFFFF"))
-            self.stroke_on.setChecked(bool(text.get("stroke_enabled", True))); self.stroke_color.setText(_normalize_hex(str(text.get("stroke_color_hex", "#000000")), "#000000")); self.stroke_width.setValue(int(float(text.get("stroke_width_px", 2))))
-            self.logo_asset.setText(str(self._cfg.get("logo", {}).get("asset_rel_path", "")))
-            self.text_box.setVisible(self._active == "text"); self.logo_box.setVisible(self._active == "logo")
         finally:
             self._loading = False

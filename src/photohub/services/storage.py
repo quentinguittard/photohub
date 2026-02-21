@@ -79,6 +79,11 @@ class StorageService:
         save_settings(settings)
         return normalized
 
+    def set_dashboard_banner(self, banner_path: str | None) -> None:
+        settings = load_settings()
+        settings["dashboard_banner"] = banner_path
+        save_settings(settings)
+
     def set_global_storage_root(self, new_root: str | Path) -> MigrationResult:
         if self._migration_running:
             raise ValueError("Une migration est deja en cours.")

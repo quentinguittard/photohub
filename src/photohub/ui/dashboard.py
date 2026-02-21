@@ -1,8 +1,9 @@
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QIcon
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -33,6 +34,7 @@ class DashboardTab(QWidget):
         storage_service: StorageService | None = None,
         job_queue_service: JobQueueService | None = None,
         on_navigate: Callable[[str], None] | None = None,
+        get_icon: Callable[[str], QIcon] | None = None,
     ) -> None:
         super().__init__()
         self.project_service = project_service
@@ -40,6 +42,7 @@ class DashboardTab(QWidget):
         self.storage_service = storage_service
         self.job_queue_service = job_queue_service
         self.on_navigate = on_navigate
+        self.get_icon = get_icon
 
         # Main Layout
         self.main_layout = QVBoxLayout(self)
@@ -81,6 +84,20 @@ class DashboardTab(QWidget):
         self._refresh_jobs_only()
 
     def _setup_header(self) -> None:
+        # Banner
+        self.banner_label = QLabel()
+        self.banner_label.setFixedHeight(200)
+        self.banner_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.banner_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.banner_label.setObjectName("DashboardBanner")
+        self.banner_label.setStyleSheet("""
+            background: #242424;
+            border-radius: 14px;
+            border: 1px solid #3A3A3A;
+        """)
+        self.banner_label.setVisible(False)
+        self.main_layout.addWidget(self.banner_label)
+
         header = QWidget()
         layout = QHBoxLayout(header)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -92,10 +109,10 @@ class DashboardTab(QWidget):
         
         title = QLabel(f"{greeting}, Studio.")
         title.setObjectName("PageTitle")
-        title.setStyleSheet("font-size: 28px; font-weight: 800; color: #E8E8E8;")
+        title.setStyleSheet("font-size: 28px; font-weight: 800; color: #E8E8E8; background: transparent;")
         
         date_label = QLabel(now.strftime("%A %d %B %Y").capitalize())
-        date_label.setStyleSheet("color: #7A7A7A; font-size: 14px; font-weight: 500;")
+        date_label.setStyleSheet("color: #7A7A7A; font-size: 14px; font-weight: 500; background: transparent;")
         
         text_layout = QVBoxLayout()
         text_layout.addWidget(title)
@@ -111,19 +128,19 @@ class DashboardTab(QWidget):
         self.kpi_import = self._create_kpi_card("A Importer", "0", 0, 1) # active state?
         self.kpi_jobs = self._create_kpi_card("Taches en cours", "0", 0, 2)
         # Replaced 'A Livrer' with 'Stockage' to provide more utility
-        self.kpi_storage = self._create_kpi_card("Stockage", "0%", 0, 3)
+        self.kpi_storage = self._create_kpi_card("Disque utilisé", "0%", 0, 3)
 
     def _create_kpi_card(self, title: str, value: str, row: int, col: int) -> QLabel:
         card = BentoCard()
         # Custom layout for KPI to make it pop
-        layout = QVBoxLayout(card.content_area)
+        layout = card.content_layout
         layout.setSpacing(4)
         
         t_label = QLabel(title)
         t_label.setObjectName("BentoCardTitle") # Reuse style
         
         v_label = QLabel(value)
-        v_label.setStyleSheet("font-size: 32px; font-weight: 700; color: #E8E8E8;")
+        v_label.setStyleSheet("font-size: 32px; font-weight: 700; color: #E8E8E8; background: transparent;")
         v_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
         
         layout.addWidget(t_label)
@@ -136,19 +153,20 @@ class DashboardTab(QWidget):
     def _init_quick_actions(self) -> None:
         # Row 1: Large actionable buttons
         container = BentoCard("Actions Rapides")
-        layout = QHBoxLayout(container.content_area)
+        layout = QHBoxLayout()
+        container.content_layout.addLayout(layout)
         layout.setSpacing(16)
 
         # New Project
-        btn_new = self._create_action_btn("Nouveau Projet", "Create new session", QStyle.StandardPixmap.SP_FileIcon)
-        btn_new.clicked.connect(lambda: self._trigger_nav("projects")) # Ideally opens 'New Project' dialog
+        btn_new = self._create_action_btn("Nouveau Projet", "Creer une nouvelle session", "ALBUM")
+        btn_new.clicked.connect(lambda: self._trigger_nav("projects"))
         
         # Ingest
-        btn_ingest = self._create_action_btn("Ingest", "Import from card", QStyle.StandardPixmap.SP_ArrowDown)
+        btn_ingest = self._create_action_btn("Ingest", "Importer depuis la carte", "DOWNLOAD")
         btn_ingest.clicked.connect(lambda: self._trigger_nav("ingest"))
         
         # Export
-        btn_export = self._create_action_btn("Export", "Deliver to client", QStyle.StandardPixmap.SP_ArrowForward)
+        btn_export = self._create_action_btn("Export", "Livrer au client", "SEND")
         btn_export.clicked.connect(lambda: self._trigger_nav("export"))
         
         layout.addWidget(btn_new)
@@ -157,42 +175,86 @@ class DashboardTab(QWidget):
         
         self.grid.addWidget(container, 1, 0, 1, 4) # Full width
 
-    def _create_action_btn(self, title: str, subtitle: str, icon_pix: QStyle.StandardPixmap) -> QPushButton:
+    def _create_action_btn(self, title: str, subtitle: str, icon_key: str) -> QPushButton:
         btn = QPushButton()
         btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
         btn.setMinimumHeight(80)
         
-        # We use a custom layout inside the button or just basic text if styling permits
-        # For simplicity and styling robustness, we'll set text and use stylesheet
-        # But we want title + subtitle.
+        # Internal layout to handle complex text + icon
+        # We use a main vertical layout and a horizontal row for title+icon
+        main_layout = QVBoxLayout(btn)
+        main_layout.setContentsMargins(20, 14, 16, 14) # Shifted right (20px)
+        main_layout.setSpacing(2)
         
-        # Let's use a layout inside the button? No, QPushButton doesn't easily support layouts.
-        # We'll use a QFrame that acts like a button? 
-        # Actually, let's keep it simple: "Title\nSubtitle" and allow properties.
-        btn.setText(f"{title}\n{subtitle}")
-        icon = self.style().standardIcon(icon_pix)
-        btn.setIcon(icon)
-        btn.setIconSize(QSize(24, 24))
+        # Top Row: Icon + Title
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.setSpacing(10) # Tighter spacing between icon and text
         
-        # Style
+        icon_label = QLabel()
+        icon_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        icon_label.setFixedSize(20, 20) # Slightly smaller, sharper icon
+        
+        icon = QIcon()
+        if self.get_icon:
+            icon = self.get_icon(icon_key)
+        
+        if icon.isNull():
+            style = self.style()
+            if icon_key == "ALBUM": pix = QStyle.StandardPixmap.SP_DirIcon
+            elif icon_key == "DOWNLOAD": pix = QStyle.StandardPixmap.SP_ArrowDown
+            elif icon_key == "SEND": pix = QStyle.StandardPixmap.SP_ArrowForward
+            else: pix = QStyle.StandardPixmap.SP_FileIcon
+            icon = style.standardIcon(pix)
+            
+        icon_label.setPixmap(icon.pixmap(20, 20))
+        icon_label.setStyleSheet("background: transparent;")
+        
+        t_label = QLabel(title)
+        t_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #E8E8E8; background: transparent;")
+        t_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        title_row.addWidget(icon_label)
+        title_row.addWidget(t_label)
+        title_row.addStretch()
+        
+        # Bottom Row: Subtitle (indented to match title)
+        sub_row = QHBoxLayout()
+        sub_row.setContentsMargins(0, 0, 0, 0)
+        sub_row.setSpacing(0)
+        
+        # Spacer to indent subtitle exactly under the title
+        # Indent = icon_width (20) + title_row spacing (10) = 30
+        spacer = QWidget()
+        spacer.setFixedWidth(30)
+        spacer.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        s_label = QLabel(subtitle)
+        s_label.setStyleSheet("font-size: 11px; font-weight: 500; color: #7A7A7A; background: transparent;")
+        s_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        sub_row.addWidget(spacer)
+        sub_row.addWidget(s_label)
+        sub_row.addStretch()
+        
+        main_layout.addLayout(title_row)
+        main_layout.addLayout(sub_row)
+        
+        # Button Style
         btn.setStyleSheet("""
             QPushButton {
-                text-align: left;
-                padding: 16px;
                 border: 1px solid #3A3A3A;
                 border-radius: 12px;
                 background-color: #242424;
-                color: #E8E8E8;
-                font-size: 14px;
-                font-weight: 600;
             }
             QPushButton:hover {
                 background-color: #2D2D2D;
-                border-color: #545454;
+                border-color: #4A4A4A;
             }
             QPushButton:pressed {
                 background-color: #1A1A1A;
+                border-color: #333333;
             }
         """)
         return btn
@@ -200,8 +262,8 @@ class DashboardTab(QWidget):
     def _init_recent_projects(self) -> None:
         # Row 2: Recent Projects List
         # This will separate the list into a card
-        self.recent_container = BentoCard("Projets Recents")
-        self.recent_layout = QVBoxLayout(self.recent_container.content_area)
+        self.recent_container = BentoCard("Projets Récents")
+        self.recent_layout = self.recent_container.content_layout
         self.recent_layout.setSpacing(8)
         self.recent_layout.setContentsMargins(0, 10, 0, 0)
         
@@ -209,12 +271,12 @@ class DashboardTab(QWidget):
         
         
         # Row 2 Right: Active Job Monitor (Replacing Notifications for utility)
-        self.jobs_container = BentoCard("Activite en cours")
-        self.jobs_layout = QVBoxLayout(self.jobs_container.content_area)
+        self.jobs_container = BentoCard("Activité en cours")
+        self.jobs_layout = self.jobs_container.content_layout
         
         # Placeholder
-        lbl = QLabel("Aucune tache en cours.")
-        lbl.setStyleSheet("color: #7A7A7A; font-style: italic;")
+        lbl = QLabel("Aucune tâche en cours.")
+        lbl.setStyleSheet("color: #7A7A7A; font-style: italic; background: transparent;")
         self.jobs_layout.addWidget(lbl)
         self.jobs_layout.addStretch()
         
@@ -234,9 +296,16 @@ class DashboardTab(QWidget):
         if self.storage_service:
             usage = self.storage_service.get_storage_usage()
             percent = usage.get("percent_used", 0)
+            total_gb = usage.get("total_gb", 0)
             free_gb = usage.get("free_gb", 0)
+            settings = self.storage_service.get_settings()
+            root_path = settings.get("storage_root", "")
             self.kpi_storage.setText(f"{percent}%")
-            self.kpi_storage.setToolTip(f"{free_gb} GB Libres")
+            self.kpi_storage.setToolTip(
+                f"Disque hébergeant vos données PhotoHub\n"
+                f"Dossier : {root_path}\n"
+                f"Capacité : {total_gb} GB  ·  Libre : {free_gb} GB"
+            )
             # Dynamic color for storage warning
             if percent > 90:
                 self.kpi_storage.setStyleSheet("font-size: 32px; font-weight: 700; color: #EF4444;") # Red
@@ -250,8 +319,42 @@ class DashboardTab(QWidget):
         # Update Recent
         self._update_recent_list(projects[:5])
         
+        # Update Banner if set in settings
+        settings = self.storage_service.get_settings() if self.storage_service else {}
+        banner_path = settings.get("dashboard_banner")
+        self.set_banner(banner_path)
+        
         # Update Jobs
         self._refresh_jobs_only()
+
+    def set_banner(self, banner_path: str | None) -> None:
+        if not banner_path or not Path(banner_path).exists():
+            self.banner_label.setVisible(False)
+            return
+
+        pixmap = QPixmap(banner_path)
+        if pixmap.isNull():
+            self.banner_label.setVisible(False)
+            return
+
+        # Center-crop: scale to fill 200px height while keeping aspect ratio,
+        # then crop horizontally from center to fit the available width.
+        target_h = 200
+        target_w = self.banner_label.width() or self.width() or 1200
+
+        scaled = pixmap.scaled(
+            target_w, target_h,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+
+        # Crop from center
+        x = max(0, (scaled.width() - target_w) // 2)
+        y = max(0, (scaled.height() - target_h) // 2)
+        cropped = scaled.copy(x, y, target_w, target_h)
+
+        self.banner_label.setPixmap(cropped)
+        self.banner_label.setVisible(True)
 
     def _refresh_jobs_only(self) -> None:
         if not self.job_queue_service:
@@ -266,8 +369,8 @@ class DashboardTab(QWidget):
                 item.widget().deleteLater()
                 
         if not active_jobs:
-            lbl = QLabel("Aucune tache en cours.")
-            lbl.setStyleSheet("color: #7A7A7A; font-style: italic;")
+            lbl = QLabel("Aucune tâche en cours.")
+            lbl.setStyleSheet("color: #7A7A7A; font-style: italic; background: transparent;")
             self.jobs_layout.addWidget(lbl)
             self.jobs_layout.addStretch()
             return
@@ -331,8 +434,8 @@ class DashboardTab(QWidget):
                 item.widget().deleteLater()
 
         if not projects:
-            lbl = QLabel("Aucun projet recent.")
-            lbl.setStyleSheet("color: #7A7A7A;")
+            lbl = QLabel("Aucun projet récent.")
+            lbl.setStyleSheet("color: #7A7A7A; background: transparent;")
             self.recent_layout.addWidget(lbl)
             return
 
@@ -369,13 +472,13 @@ class DashboardTab(QWidget):
         elif project.status == "en_cours": status_color = "#3B82F6" # Blue
         elif project.status == "a_importer": status_color = "#F59E0B" # Orange
         
-        dot.setStyleSheet(f"color: {status_color}; font-size: 14px;")
+        dot.setStyleSheet(f"color: {status_color}; font-size: 14px; background: transparent;")
         
         name = QLabel(project.name)
-        name.setStyleSheet("font-weight: 600; color: #E8E8E8;")
+        name.setStyleSheet("font-weight: 600; color: #E8E8E8; background: transparent;")
         
         client = QLabel(project.client.name if project.client else "-")
-        client.setStyleSheet("color: #B2B2B2;")
+        client.setStyleSheet("color: #B2B2B2; background: transparent;")
         
         layout.addWidget(dot)
         layout.addWidget(name, 2)

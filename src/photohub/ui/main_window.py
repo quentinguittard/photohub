@@ -5,6 +5,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QEvent, QObject, QSize, QThread, QTimer, Qt, Signal
@@ -59,6 +60,18 @@ from ..services import (
     RenameService,
     StorageService,
 )
+
+try:
+    from PIL import Image, ImageEnhance, ImageOps
+    from PIL.ImageQt import ImageQt
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+    Image = None
+    ImageEnhance = None
+    ImageOps = None
+    ImageQt = None
+
 from ..services.edits import DEFAULT_EDIT_SETTINGS
 from ..services.watermarks import normalize_watermark_config, summarize_watermark_config
 from .watermark_editor import WatermarkEditorDialog
@@ -277,6 +290,21 @@ def _new_table_widget(rows: int = 0, columns: int = 0) -> QTableWidget:
         table.setRowCount(max(0, int(rows)))
         table.setColumnCount(max(0, int(columns)))
         return table
+
+
+def _new_tag_label(text: str, color: str = "#10B981") -> QLabel:
+    label = QLabel(text)
+    label.setObjectName("TagLabel")
+    label.setStyleSheet(f"""
+        background: {_rgba(color, 40)};
+        color: {color};
+        border: 1px solid {_rgba(color, 100)};
+        border-radius: 4px;
+        padding: 2px 8px;
+        font-size: 10px;
+        font-weight: bold;
+    """)
+    return label
 
 
 class JobWorker(QObject):
@@ -520,7 +548,8 @@ class MainWindow(QMainWindow):
             get_active_jobs=self._get_active_jobs_count,
             storage_service=self.storage_service,
             job_queue_service=self.job_queue_service,
-            on_navigate=self._switch_page
+            on_navigate=self._switch_page,
+            get_icon=self._nav_icon
         )
         self.hub_tab = ProjectsTab(self.project_service, self.preset_service, on_data_changed=self.refresh_all)
         self.import_tab = ImportTab(
@@ -642,7 +671,8 @@ class MainWindow(QMainWindow):
         self.accent_color = normalize_accent_color(settings.get("accent_color"))
         self._apply_theme()
         self._apply_sidebar_state()
-        self._append_job_event(f"Theme mis a jour (accent {self.accent_color}).")
+        self.refresh_all()
+        self._append_job_event(f"Identité visuelle mise à jour (accent {self.accent_color}).")
 
     def _build_sidebar_toggle_button(self) -> QPushButton:
         button = NativePushButton("<")
@@ -967,11 +997,23 @@ class MainWindow(QMainWindow):
 
         self.setStyleSheet(
             """
-            QWidget {
+            QMainWindow {
                 background: %(bg_app)s;
+            }
+            QWidget {
+                background: transparent;
                 color: %(text_primary)s;
                 font-family: "Segoe UI";
                 font-size: 12px;
+            }
+            QToolTip {
+                background: #1E1E1E;
+                color: #C8C8C8;
+                border: 1px solid #3A3A3A;
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-size: 11px;
+                font-family: "Segoe UI";
             }
             QLabel {
                 background: transparent;
@@ -1189,13 +1231,49 @@ class MainWindow(QMainWindow):
                 font-family: "Roboto", "Segoe UI";
                 background: transparent;
             }
-            QFrame#EditAssetList {
-                border: 1px solid %(border_subtle)s;
-                border-radius: 12px;
-                background: %(bg_panel)s;
+            QLabel#PresetFieldLabel {
+                color: %(text_muted)s;
+                font-weight: 600;
+                font-size: 11px;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                padding-bottom: 2px;
+            }
+            QLabel#SectionTitle {
+                font-weight: 700;
+                font-size: 14px;
+                color: %(text_primary)s;
+                padding-top: 10px;
+                padding-bottom: 5px;
             }
             QFrame#PresetFormPanel {
                 background: transparent;
+            }
+            QWidget#PresetAccordionHeader {
+                background: %(bg_card)s;
+                border: 1px solid %(border_subtle)s;
+                border-radius: 8px;
+            }
+            QWidget#PresetAccordionHeader:hover {
+                background: %(bg_hover)s;
+                border-color: %(border_focus)s;
+            }
+            QLabel#PresetAccordionTitle {
+                font-weight: 600;
+                font-size: 13px;
+                color: %(text_primary)s;
+            }
+            QLabel#PresetAccordionSubtitle {
+                font-size: 11px;
+                color: %(text_muted)s;
+            }
+            QFrame#PresetAccordionBody {
+                background: rgba(43, 44, 48, 80);
+                border: 1px solid %(border_subtle)s;
+                border-top: none;
+                border-bottom-left-radius: 8px;
+                border-bottom-right-radius: 8px;
+                padding: 10px;
             }
             QFrame#PresetSidebar {
                 border-left: 1px solid %(border_subtle)s;
@@ -1372,27 +1450,85 @@ class MainWindow(QMainWindow):
             }
             QPushButton[cardSelect="true"] {
                 text-align: left;
-                border: 1px solid transparent;
-                border-radius: 6px;
+                border: none;
+                border-radius: 4px;
                 background: transparent;
                 color: %(text_primary)s;
-                font-weight: 600;
-                padding: 6px 8px;
+                font-family: "Segoe UI", "Roboto", sans-serif;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 2px 4px;
             }
             QPushButton[cardSelect="true"]:hover {
                 background: %(bg_hover)s;
                 border-color: %(border_focus)s;
             }
-            QToolButton[cardToggle="true"] {
-                border: 1px solid %(border_subtle)s;
-                border-radius: 6px;
+            
+            /* Preset/Settings Accordions & Specialized Cards */
+            QFrame#PresetAccordionHeader {
                 background: %(bg_card)s;
-                color: %(text_primary)s;
-                padding: 2px;
+                border: 1px solid %(border_subtle)s;
+                border-radius: 12px;
             }
-            QToolButton[cardToggle="true"]:hover {
+            QFrame#PresetAccordionHeader:hover {
                 border-color: %(accent_subtle_hover)s;
                 background: %(bg_hover)s;
+            }
+            QFrame#PresetAccordionHeader[opened="true"] {
+                border-bottom-left-radius: 0px;
+                border-bottom-right-radius: 0px;
+                border-color: %(accent_subtle_hover)s;
+                background: %(bg_panel)s;
+            }
+            QFrame#PresetAccordionBody {
+                background: %(bg_panel)s;
+                border: 1px solid %(accent_subtle_hover)s;
+                border-top: none;
+                border-bottom-left-radius: 12px;
+                border-bottom-right-radius: 12px;
+            }
+            QLabel#PresetAccordionTitle {
+                font-size: 13px;
+                font-weight: 700;
+                color: %(text_primary)s;
+            }
+            QLabel#PresetAccordionSubtitle {
+                font-size: 11px;
+                color: %(text_muted)s;
+            }
+            
+            QLabel#PresetFieldLabel {
+                color: %(text_muted)s;
+                font-size: 9px;
+                font-weight: 800;
+                letter-spacing: 1.2px;
+                text-transform: uppercase;
+                margin-bottom: 2px;
+            }
+            QLabel#EditFieldLabel {
+                color: %(text_muted)s;
+                font-size: 9px;
+                font-weight: 800;
+                letter-spacing: 1.2px;
+                text-transform: none;
+                margin-bottom: 2px;
+            }
+            QLabel#EditFieldValue {
+                color: %(accent_subtle_hover)s;
+                font-family: "Consolas", monospace;
+                font-size: 11px;
+                font-weight: 700;
+            }
+            
+            /* Generic Data Badge (e.g. Migration Status) */
+            QLabel#StatusBadge {
+                background: #1E1E1E;
+                border: 1px solid #333;
+                border-radius: 6px;
+                padding: 4px 10px;
+                color: %(text_secondary)s;
+                font-size: 11px;
+                font-family: "Consolas", monospace;
             }
             QToolButton#IngestBentoButton {
                 border: 1px solid %(border_subtle)s;
@@ -1591,10 +1727,56 @@ class MainWindow(QMainWindow):
                 border-color: %(border_subtle)s;
                 color: %(text_muted)s;
             }
-            QPushButton[isPrimaryButton="true"]:disabled {
-                background: %(bg_panel)s;
                 border-color: %(border_subtle)s;
                 color: %(text_muted)s;
+            }
+            QPushButton#TinderKeepBtn {
+                background: rgba(34, 197, 94, 0.15);
+                border: 1px solid rgba(34, 197, 94, 0.3);
+                border-radius: 12px;
+                color: #4ade80;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 10px;
+            }
+            QPushButton#TinderKeepBtn:hover {
+                background: rgba(34, 197, 94, 0.25);
+                border-color: #22c55e;
+                color: white;
+            }
+            QPushButton#TinderKeepBtn:pressed {
+                background: #166534;
+            }
+            
+            QPushButton#TinderRejectBtn {
+                background: rgba(239, 68, 68, 0.15);
+                border: 1px solid rgba(239, 68, 68, 0.3);
+                border-radius: 12px;
+                color: #f87171;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 10px;
+            }
+            QPushButton#TinderRejectBtn:hover {
+                background: rgba(239, 68, 68, 0.25);
+                border-color: #ef4444;
+                color: white;
+            }
+            QPushButton#TinderRejectBtn:pressed {
+                background: #991b1b;
+            }
+
+            QToolButton#TinderStarBtn {
+                background: transparent;
+                border: none;
+                color: #71717A;
+                font-size: 20px;
+            }
+            QToolButton#TinderStarBtn:hover {
+                color: #FACC15;
+            }
+            QToolButton#TinderStarBtn:checked {
+                color: #FDE047;
             }
             """
             % {
@@ -1658,117 +1840,158 @@ class BatchRenameTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
         self._selected_project_id: Optional[int] = None
-        # Redundant project selector removed, follows global context.
 
-        header = QFrame()
-        header.setObjectName("EditHeaderBar")
-        header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(12, 8, 12, 8)
-        header_layout.setSpacing(8)
-        
+        # ── 1. Top Control Bar ──
+        controls_card = BentoCard("Configuration du renommage")
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(12, 8, 12, 8)
+        controls_layout.setSpacing(16)
+
+        # Filters (Consolidated in top bar)
+        filter_group = QHBoxLayout()
+        filter_group.setSpacing(8)
+        filter_group.addWidget(QLabel("Filtre:"))
         self.rejected_mode_combo = QComboBox()
         self.rejected_mode_combo.addItem("Tout", userData="all")
         self.rejected_mode_combo.addItem("A garder", userData="kept")
         self.rejected_mode_combo.addItem("Rejetees", userData="rejected")
+        self.rejected_mode_combo.setFixedWidth(100)
         self.rejected_mode_combo.currentIndexChanged.connect(self._load_assets)
+        filter_group.addWidget(self.rejected_mode_combo)
 
         self.min_rating_combo = QComboBox()
         for rating in range(0, 6):
             self.min_rating_combo.addItem(str(rating), userData=rating)
+        self.min_rating_combo.setFixedWidth(50)
         self.min_rating_combo.currentIndexChanged.connect(self._load_assets)
+        filter_group.addWidget(QLabel("★"))
+        filter_group.addWidget(self.min_rating_combo)
+        
+        controls_layout.addLayout(filter_group)
+        controls_layout.addSpacing(10)
 
-        header_layout.addWidget(QLabel("Filtre"))
-        header_layout.addWidget(self.rejected_mode_combo)
-        header_layout.addWidget(QLabel("Note min"))
-        header_layout.addWidget(self.min_rating_combo)
-        refresh_btn = _new_button("Rafraichir")
-        refresh_btn.clicked.connect(self._load_assets)
-        header_layout.addWidget(refresh_btn)
-        header_layout.addStretch(1)
-        layout.addWidget(header)
-
+        # Pattern & Sequence
+        controls_layout.addWidget(QLabel("Modèle:"))
         self.pattern_edit = QLineEdit()
         self.pattern_edit.setPlaceholderText("{project}_{date}_{seq:04d}")
-        self.pattern_edit.setToolTip("Variables: {project}, {date}, {seq}, {orig}")
+        self.pattern_edit.setToolTip(
+            "Tags disponibles :\n"
+            "  {project}  — Nom du projet\n"
+            "  {date}       — Date de shooting (YYYYMMDD)\n"
+            "  {seq:04d}  — Numéro séquentiel (ex: 0001)\n"
+            "  {orig}       — Nom original du fichier"
+        )
         self.pattern_edit.textChanged.connect(self._refresh_preview)
+        pattern_container = QVBoxLayout()
+        pattern_container.setSpacing(2)
+        pattern_container.addWidget(self.pattern_edit)
+        pattern_hint = QLabel("Tags : {project}  {date}  {seq:04d}  {orig}")
+        pattern_hint.setStyleSheet("color: #777; font-size: 9px; font-family: Consolas, monospace; background: transparent;")
+        pattern_container.addWidget(pattern_hint)
+        controls_layout.addLayout(pattern_container, 1)
 
+        controls_layout.addWidget(QLabel("Séquence:"))
         self.start_seq_spin = QSpinBox()
         self.start_seq_spin.setRange(1, 999999)
         self.start_seq_spin.setValue(1)
+        self.start_seq_spin.setFixedWidth(80)
         self.start_seq_spin.valueChanged.connect(self._refresh_preview)
+        controls_layout.addWidget(self.start_seq_spin)
 
-        self.select_all_btn = _new_button("Tout selectionner")
-        self.select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
-        self.select_none_btn = _new_button("Tout deselectionner")
-        self.select_none_btn.clicked.connect(lambda: self._set_all_checked(False))
-        preview_btn = _new_button("Previsualiser")
-        preview_btn.clicked.connect(self._refresh_preview)
-        self.run_btn = _new_button("Lancer renommage", primary=True)
+        # Main Action
+        self.run_btn = _new_button("Renommer", primary=True)
+        self.run_btn.setFixedWidth(110)
         self.run_btn.clicked.connect(self._run_rename)
-        self.cancel_btn = _new_button("Annuler")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._cancel_rename)
+        controls_layout.addWidget(self.run_btn)
 
+        controls_card.content_layout.addLayout(controls_layout)
+        layout.addWidget(controls_card)
+
+        # ── 2. Middle Row (Selection & Preview) ──
+        main_content = QHBoxLayout()
+        main_content.setSpacing(10)
+
+        # 2a. Selection Column
+        select_card = BentoCard("Sélection des fichiers")
+        select_content = QVBoxLayout()
+        
+        select_actions = QHBoxLayout()
+        self.select_all_btn = _new_button("Tout")
+        self.select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
+        self.select_none_btn = _new_button("Aucun")
+        self.select_none_btn.clicked.connect(lambda: self._set_all_checked(False))
+        self.summary_label = QLabel("0 sélectionné")
+        self.summary_label.setObjectName("CullingMeta")
+        
+        select_actions.addWidget(self.select_all_btn)
+        select_actions.addWidget(self.select_none_btn)
+        select_actions.addStretch(1)
+        select_actions.addWidget(self.summary_label)
+        select_content.addLayout(select_actions)
+
+        self.assets_area = QScrollArea()
+        self.assets_area.setWidgetResizable(True)
+        self.assets_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.assets_content = QWidget()
+        self.assets_layout = QVBoxLayout(self.assets_content)
+        self.assets_layout.setContentsMargins(0, 4, 0, 4)
+        self.assets_layout.setSpacing(2)
+        self.assets_area.setWidget(self.assets_content)
+        select_content.addWidget(self.assets_area)
+        
+        select_card.content_layout.addLayout(select_content)
+        main_content.addWidget(select_card, 1)
+
+        # 2b. Preview Column
+        preview_card = BentoCard("Aperçu du renommage")
+        preview_content = QVBoxLayout()
+        
+        self.preview_text = QPlainTextEdit()
+        self.preview_text.setReadOnly(True)
+        # Styled like a terminal preview
+        self.preview_text.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0F172A;
+                color: #94A3B8;
+                font-family: 'Consolas', 'Monaco', monospace;
+                border: none;
+                border-radius: 4px;
+            }
+        """)
+        preview_content.addWidget(self.preview_text)
+        
+        preview_card.content_layout.addLayout(preview_content)
+        main_content.addWidget(preview_card, 1)
+
+        layout.addLayout(main_content, 1)
+
+        # ── 3. Bottom Progress Area ──
+        progress_container = QWidget()
+        progress_layout = QVBoxLayout(progress_container)
+        progress_layout.setContentsMargins(10, 0, 10, 10)
+        progress_layout.setSpacing(4)
+        
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
-        self.summary_label = QLabel("Selection: 0 | a renommer: 0")
-        self.summary_label.setObjectName("CardValue")
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setTextVisible(False)
+        
+        self.job_status_label = QLabel("Prêt.")
+        self.job_status_label.setObjectName("CullingMeta")
+        self.job_status_label.setStyleSheet("color: #94A3B8; font-size: 11px;")
 
-        context_box = QGroupBox("Renommage contextuel")
-        context_layout = QVBoxLayout(context_box)
-        context_layout.setContentsMargins(14, 12, 14, 12)
-        context_layout.setSpacing(8)
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.job_status_label)
+        layout.addWidget(progress_container)
 
-        pattern_grid = QGridLayout()
-        pattern_grid.setContentsMargins(0, 0, 0, 0)
-        pattern_grid.setHorizontalSpacing(10)
-        pattern_grid.setVerticalSpacing(6)
-        pattern_grid.addWidget(QLabel("Modele"), 0, 0)
-        pattern_grid.addWidget(self.pattern_edit, 0, 1)
-        pattern_grid.addWidget(QLabel("Compteur"), 0, 2)
-        pattern_grid.addWidget(self.start_seq_spin, 0, 3)
-        context_layout.addLayout(pattern_grid)
-        context_layout.addWidget(self.summary_label)
-
-        self.preview_text = QPlainTextEdit()
-        self.preview_text.setReadOnly(True)
-        self.preview_text.setMinimumHeight(220)
-        context_layout.addWidget(self.preview_text, 1)
-
-        actions_row = QHBoxLayout()
-        actions_row.setContentsMargins(0, 0, 0, 0)
-        actions_row.setSpacing(8)
-        actions_row.addWidget(self.select_all_btn)
-        actions_row.addWidget(self.select_none_btn)
-        actions_row.addWidget(preview_btn)
-        actions_row.addStretch(1)
-        actions_row.addWidget(self.run_btn)
-        actions_row.addWidget(self.cancel_btn)
-        context_layout.addLayout(actions_row)
-        context_layout.addWidget(self.progress_bar)
-        layout.addWidget(context_box)
-
-        select_box = QGroupBox("Selection")
-        select_layout = QVBoxLayout(select_box)
-        select_layout.setContentsMargins(10, 8, 10, 10)
-        select_layout.setSpacing(6)
-        self.assets_area = QScrollArea()
-        self.assets_area.setWidgetResizable(True)
-        self.assets_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.assets_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.assets_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.assets_content = QWidget()
-        self.assets_layout = QVBoxLayout(self.assets_content)
-        self.assets_layout.setContentsMargins(4, 4, 4, 4)
-        self.assets_layout.setSpacing(8)
-        self.assets_area.setWidget(self.assets_content)
-        select_layout.addWidget(self.assets_area)
-        layout.addWidget(select_box, 1)
+        # Dummy/Legacy references
+        self.cancel_btn = QWidget()
+        self.cancel_btn.setEnabled = lambda x: None # Mock for compatibility
         self.main_splitter = None
 
     def refresh_data(self) -> None:
@@ -1811,7 +2034,7 @@ class BatchRenameTab(QWidget):
 
         if project_id is None:
             self.preview_text.setPlainText("Selectionne un projet.")
-            self.summary_label.setText("Selection: 0 | a renommer: 0")
+            self.summary_label.setText("0 sélectionné")
             self.run_btn.setEnabled(False)
             return
 
@@ -1882,14 +2105,14 @@ class BatchRenameTab(QWidget):
         project_id = self._selected_project_id
         if project_id is None:
             self.preview_text.setPlainText("Selectionne un projet.")
-            self.summary_label.setText("Selection: 0 | a renommer: 0")
+            self.summary_label.setText("0 sélectionné")
             self.run_btn.setEnabled(False)
             return
 
         selected_ids = self._selected_asset_ids()
         if not selected_ids:
             self.preview_text.setPlainText("Selectionne au moins une photo.")
-            self.summary_label.setText("Selection: 0 | a renommer: 0")
+            self.summary_label.setText("0 sélectionné")
             self.run_btn.setEnabled(False)
             return
 
@@ -1904,7 +2127,7 @@ class BatchRenameTab(QWidget):
             )
         except Exception as exc:
             self.preview_text.setPlainText(f"Erreur preview: {exc}")
-            self.summary_label.setText(f"Selection: {len(selected_ids)} | a renommer: 0")
+            self.summary_label.setText(f"{len(selected_ids)} sélectionnés (0 à renommer)")
             self.run_btn.setEnabled(False)
             return
 
@@ -1923,7 +2146,7 @@ class BatchRenameTab(QWidget):
             lines.append(f"... ({len(preview) - limit} ligne(s) masquees)")
 
         self.preview_text.setPlainText("\n".join(lines) if lines else "Aucun item.")
-        self.summary_label.setText(f"Selection: {len(selected_ids)} | a renommer: {changed}")
+        self.summary_label.setText(f"{len(selected_ids)} sélectionnés ({changed} à renommer)")
         self.run_btn.setEnabled(changed > 0 and self._job_thread is None)
 
     def _run_rename(self) -> None:
@@ -1989,7 +2212,7 @@ class BatchRenameTab(QWidget):
         self.progress_bar.setMaximum(safe_total)
         self.progress_bar.setValue(max(0, min(int(done), safe_total)))
         if detail:
-            self.summary_label.setText(f"Progression: {done}/{safe_total} | {detail}")
+            self.job_status_label.setText(f"Progression: {done}/{safe_total} | {detail}")
 
     def _on_result(self, result) -> None:
         status = str(getattr(result, "status", "completed"))
@@ -2148,86 +2371,73 @@ class ImportTab(QWidget):
         self._selected_project_id: Optional[int] = None
         # Redundant project selector removed, now follows global context from header.
 
-        cards_row = QHBoxLayout()
-        cards_row.setContentsMargins(0, 0, 0, 0)
-        cards_row.setSpacing(10)
-
-        source_box = QGroupBox("Sources d'import")
-        source_layout = QVBoxLayout(source_box)
-        source_layout.setContentsMargins(14, 12, 14, 12)
-        source_layout.setSpacing(8)
-        source_hint = QLabel("Choisis une source puis lance l'ingestion securisee.")
-        source_hint.setObjectName("CardMuted")
-        source_layout.addWidget(source_hint)
-
-        bento_grid = QGridLayout()
-        bento_grid.setContentsMargins(0, 0, 0, 0)
-        bento_grid.setHorizontalSpacing(8)
-        bento_grid.setVerticalSpacing(8)
-        self.source_sd_btn = self._build_source_bento_button("Carte SD", QStyle.StandardPixmap.SP_DriveFDIcon)
-        self.source_drive_btn = self._build_source_bento_button("Disque", QStyle.StandardPixmap.SP_DriveHDIcon)
-        self.source_folder_btn = self._build_source_bento_button("Dossier", QStyle.StandardPixmap.SP_DirOpenIcon)
-        for btn in (self.source_sd_btn, self.source_drive_btn, self.source_folder_btn):
-            btn.clicked.connect(self._pick_source)
-        bento_grid.addWidget(self.source_sd_btn, 0, 0)
-        bento_grid.addWidget(self.source_drive_btn, 0, 1)
-        bento_grid.addWidget(self.source_folder_btn, 0, 2)
-        source_layout.addLayout(bento_grid)
-
-        source_row = QHBoxLayout()
+        # ── 1. Top Control Bar ──
+        controls_card = BentoCard("Importation des fichiers")
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(12, 8, 12, 8)
+        controls_layout.setSpacing(12)
+        
+        # Source Selection
+        controls_layout.addWidget(QLabel("Dossier Source:"))
         self.source_edit = QLineEdit()
-        self.source_edit.setPlaceholderText("Dossier source (carte SD / disque)")
+        self.source_edit.setPlaceholderText("Parcourir un dossier ou une carte SD...")
+        
         browse_btn = _new_button("Parcourir")
+        browse_btn.setFixedWidth(100)
         browse_btn.clicked.connect(self._pick_source)
-        source_row.addWidget(self.source_edit)
-        source_row.addWidget(browse_btn)
-        source_layout.addLayout(source_row)
-
-        action_box = QGroupBox("Execution")
-        action_layout = QVBoxLayout(action_box)
-        action_layout.setContentsMargins(14, 12, 14, 12)
-        action_layout.setSpacing(8)
-        self.run_btn = _new_button("Lancer Import", primary=True)
+        
+        controls_layout.addWidget(self.source_edit, 1) # Stretch to fill space
+        controls_layout.addWidget(browse_btn)
+        
+        # Action Button
+        self.run_btn = _new_button("Importer", primary=True)
+        self.run_btn.setFixedWidth(120)
         self.run_btn.clicked.connect(self._run_import)
-        self.cancel_btn = _new_button("Annuler")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._cancel_import)
+        
+        controls_layout.addWidget(self.run_btn)
+        
+        controls_card.content_layout.addLayout(controls_layout)
+        layout.addWidget(controls_card)
 
-        run_row = QHBoxLayout()
-        run_row.addWidget(self.run_btn)
-        run_row.addWidget(self.cancel_btn)
-        action_layout.addLayout(run_row)
+        # ── 2. Journal area ──
+        self.log_card = BentoCard("Journal d'importation")
+        self.log_text = QPlainTextEdit()
+        self.log_text.setReadOnly(True)
+        # Style the log for a terminal look (dark, monospaced)
+        self.log_text.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0F172A;
+                color: #E2E8F0;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 13px;
+                border: none;
+                border-radius: 4px;
+            }
+        """)
+        self.log_card.content_layout.addWidget(self.log_text)
+        layout.addWidget(self.log_card, 1)
 
+        # ── 3. Bottom Progress Area (Full Width) ──
+        progress_container = QWidget()
+        progress_layout = QVBoxLayout(progress_container)
+        progress_layout.setContentsMargins(10, 0, 10, 10)
+        progress_layout.setSpacing(4)
+        
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
-        action_layout.addWidget(self.progress_bar)
-        self.import_meta_label = QLabel("Pret.")
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setTextVisible(False) # Cleaner look
+        
+        self.import_meta_label = QLabel("Prêt pour l'importation.")
         self.import_meta_label.setObjectName("CullingMeta")
-        action_layout.addWidget(self.import_meta_label)
+        self.import_meta_label.setStyleSheet("color: #94A3B8; font-size: 11px;")
 
-        cards_row.addWidget(source_box, 2)
-        cards_row.addWidget(action_box, 1)
-        layout.addLayout(cards_row)
-
-        log_box = QGroupBox("Journal import")
-        log_layout = QVBoxLayout(log_box)
-        log_layout.setContentsMargins(10, 10, 10, 10)
-        self.log_text = QPlainTextEdit()
-        self.log_text.setReadOnly(True)
-        log_layout.addWidget(self.log_text)
-        layout.addWidget(log_box, 1)
-
-    def _build_source_bento_button(self, label: str, icon_type: QStyle.StandardPixmap) -> QToolButton:
-        btn = QToolButton()
-        btn.setObjectName("IngestBentoButton")
-        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
-        btn.setIcon(self.style().standardIcon(icon_type))
-        btn.setText(label)
-        btn.setMinimumSize(108, 74)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        return btn
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.import_meta_label)
+        
+        layout.addWidget(progress_container)
 
     def refresh_data(self) -> None:
         pass # Combo removed, nothing to refresh here for now.
@@ -2254,7 +2464,6 @@ class ImportTab(QWidget):
             return
 
         self.run_btn.setEnabled(False)
-        self.cancel_btn.setEnabled(True)
         self.progress_bar.setValue(0)
         self.on_operation_started()
         self.on_job_event(f"[Import] Lancement du job pour projet ID {project_id}.")
@@ -2277,7 +2486,6 @@ class ImportTab(QWidget):
     def _cancel_import(self) -> None:
         if self._job_worker is not None:
             self._job_worker.cancel()
-            self.cancel_btn.setEnabled(False)
             self.import_meta_label.setText("Annulation demandee...")
             self.on_job_event("[Import] Annulation demandee par l'utilisateur.")
 
@@ -2308,7 +2516,6 @@ class ImportTab(QWidget):
 
     def _on_import_finished(self) -> None:
         self.run_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
         self.on_operation_ended()
         self._job_worker = None
         self._job_thread = None
@@ -2336,7 +2543,6 @@ class CullingTab(QWidget):
         self._job_thread: QThread | None = None
         self._job_worker: JobWorker | None = None
         self.focus_mode_enabled = False
-        self.batch_solo_mode = False
         self.asset_card_widgets: dict[int, QFrame] = {}
         self.show_path_overlay = False
         self._preview_hovered = False
@@ -2357,297 +2563,230 @@ class CullingTab(QWidget):
         self._hud_timer.timeout.connect(self._hide_hud)
 
         layout = QVBoxLayout(self)
-
-        controls = QGroupBox("Tri / Culling")
-        self.controls_box = controls
-        controls.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        controls_layout = QFormLayout(controls)
-        controls_layout.setVerticalSpacing(6)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
         self._selected_project_id: Optional[int] = None
-        # Redundant project selector removed.
 
+        # ── 1. Top Control Bar ──
+        controls_card = BentoCard("Configuration du tri")
+        self.controls_box = controls_card
+        controls_layout = QHBoxLayout()
+        controls_layout.setContentsMargins(12, 8, 12, 8)
+        controls_layout.setSpacing(16)
+
+        # Filters
+        filter_group = QHBoxLayout()
+        filter_group.setSpacing(8)
+        filter_group.addWidget(QLabel("Filtre:"))
         self.rejected_mode_combo = QComboBox()
         self.rejected_mode_combo.addItem("Tout", userData="all")
         self.rejected_mode_combo.addItem("A garder", userData="kept")
         self.rejected_mode_combo.addItem("Rejetees", userData="rejected")
+        self.rejected_mode_combo.setFixedWidth(100)
         self.rejected_mode_combo.currentIndexChanged.connect(self._load_assets)
+        filter_group.addWidget(self.rejected_mode_combo)
 
         self.min_rating_filter_combo = QComboBox()
         for rating in range(0, 6):
             self.min_rating_filter_combo.addItem(str(rating), userData=rating)
+        self.min_rating_filter_combo.setFixedWidth(50)
         self.min_rating_filter_combo.currentIndexChanged.connect(self._load_assets)
-
-        self.iso_min_spin = QSpinBox()
-        self.iso_min_spin.setRange(0, 102400)
-        self.iso_min_spin.setSpecialValueText("-")
-        self.iso_min_spin.setValue(0)
-        self.iso_min_spin.valueChanged.connect(self._load_assets)
-        self.iso_max_spin = QSpinBox()
-        self.iso_max_spin.setRange(0, 102400)
-        self.iso_max_spin.setSpecialValueText("-")
-        self.iso_max_spin.setValue(0)
-        self.iso_max_spin.valueChanged.connect(self._load_assets)
-        self.lens_filter_edit = QLineEdit()
-        self.lens_filter_edit.setPlaceholderText("Objectif contient...")
-        self.lens_filter_edit.setMaximumWidth(180)
-        self.lens_filter_edit.textChanged.connect(self._load_assets)
-        self.keyword_filter_edit = QLineEdit()
-        self.keyword_filter_edit.setPlaceholderText("Mot-cle")
-        self.keyword_filter_edit.setMaximumWidth(140)
-        self.keyword_filter_edit.textChanged.connect(self._load_assets)
-        self.date_from_check = QCheckBox("Date >=")
-        self.date_from_check.toggled.connect(lambda checked: self.date_from_edit.setEnabled(bool(checked)))
-        self.date_from_check.toggled.connect(self._load_assets)
-        self.date_from_edit = QDateEdit()
-        self.date_from_edit.setDisplayFormat("yyyy-MM-dd")
-        self.date_from_edit.setCalendarPopup(True)
-        self.date_from_edit.setDate(QDate.currentDate())
-        self.date_from_edit.setEnabled(False)
-        self.date_from_edit.dateChanged.connect(self._load_assets)
-        self.date_to_check = QCheckBox("Date <=")
-        self.date_to_check.toggled.connect(lambda checked: self.date_to_edit.setEnabled(bool(checked)))
-        self.date_to_check.toggled.connect(self._load_assets)
-        self.date_to_edit = QDateEdit()
-        self.date_to_edit.setDisplayFormat("yyyy-MM-dd")
-        self.date_to_edit.setCalendarPopup(True)
-        self.date_to_edit.setDate(QDate.currentDate())
-        self.date_to_edit.setEnabled(False)
-        self.date_to_edit.dateChanged.connect(self._load_assets)
-
-        filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("Filtre"))
-        filter_row.addWidget(self.rejected_mode_combo)
-        filter_row.addWidget(QLabel("Note min"))
-        filter_row.addWidget(self.min_rating_filter_combo)
-        self.advanced_filters_btn = _new_button("Filtres avances")
-        self.advanced_filters_btn.setCheckable(True)
-        self.advanced_filters_btn.toggled.connect(self._toggle_advanced_filters)
-        filter_row.addWidget(self.advanced_filters_btn)
-        filter_row.addStretch(1)
-
-        self.advanced_filters_widget = QWidget()
-        advanced_filter_row = QHBoxLayout(self.advanced_filters_widget)
-        advanced_filter_row.setContentsMargins(0, 0, 0, 0)
-        advanced_filter_row.setSpacing(6)
-        advanced_filter_row.addWidget(QLabel("ISO"))
-        advanced_filter_row.addWidget(self.iso_min_spin)
-        advanced_filter_row.addWidget(QLabel("a"))
-        advanced_filter_row.addWidget(self.iso_max_spin)
-        advanced_filter_row.addWidget(QLabel("Objectif"))
-        advanced_filter_row.addWidget(self.lens_filter_edit)
-        advanced_filter_row.addWidget(QLabel("Keyword"))
-        advanced_filter_row.addWidget(self.keyword_filter_edit)
-        advanced_filter_row.addWidget(self.date_from_check)
-        advanced_filter_row.addWidget(self.date_from_edit)
-        advanced_filter_row.addWidget(self.date_to_check)
-        advanced_filter_row.addWidget(self.date_to_edit)
-        advanced_filter_row.addStretch(1)
-        self.advanced_filters_widget.setVisible(False)
-
-        quick_row = QHBoxLayout()
-        self.prev_btn = _new_button("Precedent")
-        self.prev_btn.clicked.connect(self._select_previous_asset)
-        self.next_btn = _new_button("Suivant")
-        self.next_btn.clicked.connect(self._select_next_asset)
-        self.keep_btn = _new_button("Garder (P)")
-        self.keep_btn.clicked.connect(self._mark_selected_keep)
-        self.reject_btn = _new_button("Rejeter (X)")
-        self.reject_btn.clicked.connect(self._mark_selected_reject)
-        self.auto_advance_check = QCheckBox("Auto suivant")
-        self.auto_advance_check.setChecked(True)
-        self.overlay_toggle_btn = _new_button("Infos chemin (I)")
-        self.overlay_toggle_btn.setCheckable(True)
-        self.overlay_toggle_btn.toggled.connect(self._toggle_overlay_details)
-        self.batch_toggle_btn = _new_button("Batch (B)")
-        self.batch_toggle_btn.setCheckable(True)
-        self.batch_toggle_btn.toggled.connect(self._toggle_batch_panel)
-        self.batch_solo_btn = _new_button("Solo Batch")
-        self.batch_solo_btn.setCheckable(True)
-        self.batch_solo_btn.toggled.connect(self._set_batch_solo_mode)
-        self.focus_mode_btn = _new_button("Mode focus (F)")
+        filter_group.addWidget(QLabel("★"))
+        filter_group.addWidget(self.min_rating_filter_combo)
+        
+        controls_layout.addLayout(filter_group)
+        
+        # View Actions
+        self.focus_mode_btn = _new_button("Focus Mode (F)")
         self.focus_mode_btn.setCheckable(True)
         self.focus_mode_btn.toggled.connect(self._set_focus_mode)
-        self.prev_btn.setVisible(False)
-        self.next_btn.setVisible(False)
-        self.overlay_toggle_btn.setVisible(False)
-        self.focus_mode_btn.setVisible(False)
-        quick_row.addWidget(self.keep_btn)
-        quick_row.addWidget(self.reject_btn)
-        quick_row.addWidget(self.auto_advance_check)
-        quick_row.addWidget(self.batch_toggle_btn)
-        quick_row.addWidget(self.batch_solo_btn)
-        quick_row.addStretch(1)
 
-        # controls_layout.addRow("Projet", self.project_combo) # Removed
-        controls_layout.addRow("", filter_row)
-        controls_layout.addRow("", self.advanced_filters_widget)
-        controls_layout.addRow("", quick_row)
-        layout.addWidget(controls)
+        self.overlay_toggle_btn = QCheckBox("Infos Chemin (I)")
+        self.overlay_toggle_btn.toggled.connect(self._toggle_overlay_details)
+
+        controls_layout.addWidget(self.focus_mode_btn)
+        controls_layout.addWidget(self.overlay_toggle_btn)
+        
+        controls_layout.addStretch(1)
+        
+        self.auto_advance_check = QCheckBox("Auto suivant")
+        self.auto_advance_check.setChecked(True)
+        controls_layout.addWidget(self.auto_advance_check)
+
+        controls_card.content_layout.addLayout(controls_layout)
+        layout.addWidget(controls_card)
+
+        # Legacy stubs for compatibility
+        self.keyword_filter_edit = QLineEdit()
+        self.date_to_check = QCheckBox()
+        self.date_to_edit = QDateEdit()
+        self.prev_btn = QWidget()
+        self.next_btn = QWidget()
+        self.batch_solo_btn = QWidget()
+        self.batch_solo_btn.isChecked = lambda: False
+        self.batch_solo_btn.setChecked = lambda x: None
 
         body = QSplitter(Qt.Orientation.Horizontal)
         self.body_splitter = body
 
-        table_panel = QWidget()
-        self.asset_panel = table_panel
-        table_layout = QVBoxLayout(table_panel)
+        # Left Panel (Navigator)
+        navigator_card = BentoCard("Explorateur")
+        navigator_layout = QVBoxLayout()
+        navigator_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.selected_asset_id: int | None = None
         self.expanded_asset_ids: set[int] = set()
         self.assets_by_id: dict[int, object] = {}
         self.asset_order: list[int] = []
+        
         self.asset_cards_area = QScrollArea()
         self.asset_cards_area.setWidgetResizable(True)
         self.asset_cards_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.asset_cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.asset_cards_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.asset_cards_content = QWidget()
         self.asset_cards_layout = QVBoxLayout(self.asset_cards_content)
-        self.asset_cards_layout.setContentsMargins(4, 4, 4, 4)
-        self.asset_cards_layout.setSpacing(10)
+        self.asset_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.asset_cards_layout.setSpacing(8)
         self.asset_cards_area.setWidget(self.asset_cards_content)
-        table_layout.addWidget(self.asset_cards_area)
+        
+        navigator_layout.addWidget(self.asset_cards_area)
+        navigator_card.content_layout.addLayout(navigator_layout)
+        body.addWidget(navigator_card)
+        body.setStretchFactor(0, 1)
 
+        # Right Panel (Preview)
         side_panel = QWidget()
         self.side_panel = side_panel
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(0, 0, 0, 0)
-        side_layout.setSpacing(8)
-        preview_frame = QFrame()
-        preview_frame.setObjectName("PreviewFrame")
-        self.preview_frame = preview_frame
-        preview_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        preview_grid = QGridLayout(preview_frame)
-        preview_grid.setContentsMargins(8, 8, 8, 8)
-        self.preview_label = QLabel("Apercu")
+        side_layout.setSpacing(10)
+        
+        preview_card = BentoCard() # No title for clean look
+        preview_grid = QGridLayout()
+        preview_grid.setContentsMargins(0, 0, 0, 0)
+        
+        self.preview_label = QLabel("Aperçu")
         self.preview_label.setObjectName("PreviewLabel")
         self.preview_label.setMinimumHeight(280)
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setScaledContents(False)
+        
         self.hud_label = QLabel("")
         self.hud_label.setObjectName("CullingHud")
         self.hud_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hud_label.setVisible(False)
-        preview_grid.addWidget(self.preview_label, 0, 0)
-        preview_grid.addWidget(
-            self.hud_label,
-            0,
-            0,
-            alignment=Qt.AlignmentFlag.AlignCenter,
-        )
-        self.info_overlay_label = QLabel("Selection: -")
-        self.info_overlay_label.setObjectName("PreviewInfoOverlay")
-        self.info_overlay_label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        self.info_overlay_label = QLabel("Sélection: -")
+        self.info_overlay_label.setObjectName("CullingInfoOverlay")
+        self.info_overlay_label.setStyleSheet("""
+            background: rgba(0, 0, 0, 0.4);
+            color: #AAA;
+            padding: 4px 8px;
+            border-top-right-radius: 6px;
+            font-size: 10px;
+            font-family: 'Consolas', monospace;
+        """)
+
         self.path_overlay_label = QLabel("")
-        self.path_overlay_label.setObjectName("PreviewPathOverlay")
-        self.path_overlay_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.path_overlay_label.setObjectName("CullingPathOverlay")
+        self.path_overlay_label.setWordWrap(True)
+        self.path_overlay_label.setStyleSheet("""
+            background: rgba(0, 0, 0, 0.6);
+            color: #00FF9D;
+            padding: 6px 10px;
+            font-size: 10px;
+            font-family: 'Consolas', monospace;
+        """)
         self.path_overlay_label.setVisible(False)
-        preview_grid.addWidget(
-            self.info_overlay_label,
-            0,
-            0,
-            alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft,
-        )
-        preview_grid.addWidget(
-            self.path_overlay_label,
-            0,
-            0,
-            alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight,
-        )
-        side_layout.addWidget(preview_frame, 1)
-        self.preview_frame.installEventFilter(self)
+        
+        preview_grid.addWidget(self.preview_label, 0, 0)
+        preview_grid.addWidget(self.hud_label, 0, 0, alignment=Qt.AlignmentFlag.AlignCenter)
+        preview_grid.addWidget(self.info_overlay_label, 0, 0, alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
+        preview_grid.addWidget(self.path_overlay_label, 0, 0, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        
+        preview_card.content_layout.addLayout(preview_grid)
+        self.preview_frame = preview_card
+        side_layout.addWidget(preview_card, 1)
+        
         self.preview_label.installEventFilter(self)
+        self.preview_frame.installEventFilter(self)
 
-        self.asset_info_label = QLabel("Selection: -")
-        self.asset_sequence_label = QLabel("0 / 0")
-        self.asset_sequence_label.setObjectName("CullingMeta")
-        self.asset_info_label.setObjectName("CullingMeta")
-        self.asset_info_label.setVisible(False)
-        self.asset_sequence_label.setVisible(False)
+        # ── 3. Tinder-style Decision Bar ──
+        decision_card = BentoCard() # Clean container
+        decision_card.setMinimumHeight(80)
+        decision_layout = QHBoxLayout()
+        decision_layout.setContentsMargins(20, 10, 20, 10)
+        decision_layout.setSpacing(15)
 
+        # REJECT Button (Tinder Red)
+        self.tinder_reject_btn = QPushButton("✘ REJETER")
+        self.tinder_reject_btn.setObjectName("TinderRejectBtn")
+        self.tinder_reject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tinder_reject_btn.setMinimumHeight(44)
+        self.tinder_reject_btn.clicked.connect(self._mark_selected_reject)
+        
+        # Rating Stars (Tinder Style Between Buttons)
+        star_layout = QHBoxLayout()
+        star_layout.setSpacing(4)
+        self.star_btns = []
+        for i in range(1, 6):
+            btn = QToolButton()
+            btn.setText("★")
+            btn.setObjectName("TinderStarBtn")
+            btn.setCheckable(True)
+            btn.setFixedSize(32, 32)
+            btn.clicked.connect(lambda _, r=i: self._set_selected_rating(r))
+            star_layout.addWidget(btn)
+            self.star_btns.append(btn)
+        
+        # KEEP Button (Tinder Green)
+        self.tinder_keep_btn = QPushButton("✔ GARDER")
+        self.tinder_keep_btn.setObjectName("TinderKeepBtn")
+        self.tinder_keep_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tinder_keep_btn.setMinimumHeight(44)
+        self.tinder_keep_btn.clicked.connect(self._mark_selected_keep)
+
+        # Build Bar
+        decision_layout.addWidget(self.tinder_reject_btn, 1)
+        decision_layout.addStretch(1)
+        decision_layout.addLayout(star_layout)
+        decision_layout.addStretch(1)
+        decision_layout.addWidget(self.tinder_keep_btn, 1)
+        
+        decision_card.content_layout.addLayout(decision_layout)
+        side_layout.addWidget(decision_card)
+
+        # Filmstrip
         self.filmstrip_frame = QFrame()
         self.filmstrip_frame.setObjectName("FilmstripFrame")
-        self.filmstrip_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.filmstrip_frame.setMinimumHeight(124)
-        self.filmstrip_frame.setMaximumHeight(170)
-        filmstrip_layout = QVBoxLayout(self.filmstrip_frame)
-        filmstrip_layout.setContentsMargins(8, 8, 8, 8)
-        filmstrip_layout.setSpacing(6)
+        self.filmstrip_frame.setFixedHeight(140)
+        film_layout = QVBoxLayout(self.filmstrip_frame)
+        film_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.filmstrip_area = QScrollArea()
         self.filmstrip_area.setWidgetResizable(True)
         self.filmstrip_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.filmstrip_area.setMinimumHeight(106)
-        self.filmstrip_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.filmstrip_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.filmstrip_content = QWidget()
         self.filmstrip_layout = QHBoxLayout(self.filmstrip_content)
         self.filmstrip_layout.setContentsMargins(0, 0, 0, 0)
         self.filmstrip_layout.setSpacing(6)
         self.filmstrip_area.setWidget(self.filmstrip_content)
-        filmstrip_layout.addWidget(self.filmstrip_area)
-
-        actions_box = QGroupBox("Actions")
-        self.actions_box = actions_box
-        self.actions_box.setObjectName("BatchPanel")
-        self.actions_box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Maximum)
-        actions_layout = QVBoxLayout(actions_box)
-        instant_row = QHBoxLayout()
-        self.rating_combo = QComboBox()
-        for rating in range(0, 6):
-            self.rating_combo.addItem(str(rating), userData=rating)
-        set_rating_btn = _new_button("Appliquer note")
-        set_rating_btn.clicked.connect(self._apply_selected_rating)
-        toggle_reject_btn = _new_button("Basculer rejet")
-        toggle_reject_btn.clicked.connect(self._toggle_selected_reject)
-        instant_row.addWidget(QLabel("Note"))
-        instant_row.addWidget(self.rating_combo)
-        instant_row.addWidget(set_rating_btn)
-        instant_row.addWidget(toggle_reject_btn)
-        actions_layout.addLayout(instant_row)
-
-        batch_row = QHBoxLayout()
-        self.batch_rating_combo = QComboBox()
-        for rating in range(0, 6):
-            self.batch_rating_combo.addItem(str(rating), userData=rating)
-        batch_rate_btn = _new_button("Batch note filtres")
-        batch_rate_btn.clicked.connect(self._start_batch_rating)
-        batch_reject_btn = _new_button("Batch rejeter filtres")
-        batch_reject_btn.clicked.connect(self._start_batch_reject)
-        batch_restore_btn = _new_button("Batch restaurer filtres")
-        batch_restore_btn.clicked.connect(self._start_batch_restore)
-        batch_row.addWidget(QLabel("Batch note"))
-        batch_row.addWidget(self.batch_rating_combo)
-        batch_row.addWidget(batch_rate_btn)
-        batch_row.addWidget(batch_reject_btn)
-        batch_row.addWidget(batch_restore_btn)
-        actions_layout.addLayout(batch_row)
-
-        progress_row = QHBoxLayout()
-        self.batch_progress = QProgressBar()
-        self.batch_progress.setMinimum(0)
-        self.batch_progress.setMaximum(100)
-        self.batch_progress.setValue(0)
-        self.batch_cancel_btn = _new_button("Annuler batch")
-        self.batch_cancel_btn.setEnabled(False)
-        self.batch_cancel_btn.clicked.connect(self._cancel_batch)
-        progress_row.addWidget(self.batch_progress)
-        progress_row.addWidget(self.batch_cancel_btn)
-        actions_layout.addLayout(progress_row)
-
-        actions_box.setVisible(False)
-        side_layout.addWidget(actions_box)
-        side_layout.addWidget(self.filmstrip_frame, 0, Qt.AlignmentFlag.AlignBottom)
-
-        table_panel.setVisible(False)
-        table_panel.setMinimumWidth(0)
-        table_panel.setMaximumWidth(0)
-        body.setHandleWidth(0)
-        body.setChildrenCollapsible(False)
-        body.addWidget(table_panel)
+        film_layout.addWidget(self.filmstrip_area)
+        
+        side_layout.addWidget(self.filmstrip_frame)
         body.addWidget(side_panel)
-        body.setStretchFactor(0, 0)
-        body.setStretchFactor(1, 10)
+        body.setStretchFactor(1, 3)
         layout.addWidget(body, 1)
+
+        # Legacy stubs
+        self.asset_info_label = QLabel()
+        self.asset_sequence_label = QLabel()
+        self.actions_box_anim = None
+        self.actions_box = QWidget() # Stub
+        self.batch_progress = QProgressBar() # Stub
+        self.job_status_label = QLabel() # Stub
+        self.batch_cancel_btn = QWidget() # Stub
 
         self._build_shortcuts()
 
@@ -2674,10 +2813,6 @@ class CullingTab(QWidget):
             shortcut.activated.connect(lambda r=rating: self._set_selected_rating(r))
             self._shortcut_refs.append(shortcut)
 
-        reject_shortcut = QShortcut(QKeySequence("R"), self)
-        reject_shortcut.activated.connect(self._toggle_selected_reject)
-        self._shortcut_refs.append(reject_shortcut)
-
         keep_shortcut = QShortcut(QKeySequence("P"), self)
         keep_shortcut.activated.connect(self._mark_selected_keep)
         self._shortcut_refs.append(keep_shortcut)
@@ -2702,17 +2837,9 @@ class CullingTab(QWidget):
         focus_shortcut.activated.connect(self._toggle_focus_mode_shortcut)
         self._shortcut_refs.append(focus_shortcut)
 
-        batch_shortcut = QShortcut(QKeySequence("B"), self)
-        batch_shortcut.activated.connect(self._toggle_batch_panel_shortcut)
-        self._shortcut_refs.append(batch_shortcut)
-
         info_shortcut = QShortcut(QKeySequence("I"), self)
         info_shortcut.activated.connect(self._toggle_overlay_shortcut)
         self._shortcut_refs.append(info_shortcut)
-
-    def _toggle_advanced_filters(self, opened: bool) -> None:
-        self.advanced_filters_widget.setVisible(bool(opened))
-        self.advanced_filters_btn.setText("Filtres avances ON" if opened else "Filtres avances")
 
     def refresh_data(self) -> None:
         self._load_assets()
@@ -2738,22 +2865,11 @@ class CullingTab(QWidget):
 
         rejected_mode = self.rejected_mode_combo.currentData()
         min_rating = int(self.min_rating_filter_combo.currentData() or 0)
-        iso_min = int(self.iso_min_spin.value()) if int(self.iso_min_spin.value()) > 0 else None
-        iso_max = int(self.iso_max_spin.value()) if int(self.iso_max_spin.value()) > 0 else None
-        lens_contains = self.lens_filter_edit.text().strip()
-        keyword = self.keyword_filter_edit.text().strip()
-        shot_date_from = self.date_from_edit.date().toString("yyyy-MM-dd") if self.date_from_check.isChecked() else None
-        shot_date_to = self.date_to_edit.date().toString("yyyy-MM-dd") if self.date_to_check.isChecked() else None
+        
         assets = self.culling_service.list_assets(
             project_id=project_id,
             rejected_mode=rejected_mode,
-            min_rating=min_rating,
-            iso_min=iso_min,
-            iso_max=iso_max,
-            lens_contains=lens_contains,
-            keyword=keyword,
-            shot_date_from=shot_date_from,
-            shot_date_to=shot_date_to,
+            min_rating=min_rating
         )
 
         current_asset_id = self._selected_asset_id()
@@ -3037,7 +3153,7 @@ class CullingTab(QWidget):
         select_btn.setMinimumHeight(32)
         select_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         select_btn.clicked.connect(lambda _checked=False, asset_id=asset.id: self._on_asset_card_selected(asset_id))
-        badge = QLabel(f"Note {int(asset.rating)}")
+        badge = QLabel(f"{int(asset.rating)} ★")
         badge.setObjectName("CardBadge")
         badge.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
@@ -3093,21 +3209,28 @@ class CullingTab(QWidget):
         previous_id = self.selected_asset_id
         self.selected_asset_id = int(asset_id) if asset_id is not None else None
 
+        # Sync Tinder Stars
+        if self.selected_asset_id is not None:
+            asset = self.assets_by_id.get(self.selected_asset_id)
+            if asset:
+                rating = int(getattr(asset, "rating", 0))
+                for i, btn in enumerate(self.star_btns):
+                    btn.blockSignals(True)
+                    btn.setChecked(i < rating)
+                    btn.blockSignals(False)
+
         if previous_id is not None and previous_id != self.selected_asset_id:
             previous_card = self.asset_card_widgets.get(int(previous_id))
             if previous_card is not None:
                 previous_card.setProperty("selected", "false")
-                previous_card.style().unpolish(previous_card)
-                previous_card.style().polish(previous_card)
-                previous_card.update()
+                self._refresh_widget_style(previous_card)
 
         if self.selected_asset_id is not None:
             current_card = self.asset_card_widgets.get(int(self.selected_asset_id))
             if current_card is not None:
                 current_card.setProperty("selected", "true")
-                current_card.style().unpolish(current_card)
-                current_card.style().polish(current_card)
-                current_card.update()
+                self._refresh_widget_style(current_card)
+        
         self._refresh_filmstrip_selection()
 
     def _on_select_asset(self) -> None:
@@ -3151,7 +3274,7 @@ class CullingTab(QWidget):
         display_index = index + 1 if index >= 0 else 0
         reject_flag = " | REJECT" if rejected else ""
         self.info_overlay_label.setText(
-            f"{display_index}/{len(self.asset_order)} | {name} | note {rating} | {resolution}{reject_flag}"
+            f"{display_index}/{len(self.asset_order)} | {name} | {rating} ★ | {resolution}{reject_flag}"
         )
         self._update_overlay_visibility()
         self._prefetch_neighbors()
@@ -3174,39 +3297,14 @@ class CullingTab(QWidget):
 
     def _set_focus_mode(self, enabled: bool) -> None:
         self.focus_mode_enabled = bool(enabled)
-        if self.focus_mode_enabled and self.batch_toggle_btn.isChecked():
-            self.batch_toggle_btn.setChecked(False)
         self._apply_culling_layout_mode()
         if self.focus_mode_enabled:
             self.on_job_event("[Tri] Mode focus active.")
         else:
             self.on_job_event("[Tri] Mode focus desactive.")
 
-    def _toggle_batch_panel_shortcut(self) -> None:
-        self.batch_toggle_btn.setChecked(not self.batch_toggle_btn.isChecked())
-
-    def _toggle_batch_panel(self, opened: bool) -> None:
-        if opened and self.focus_mode_enabled:
-            self.focus_mode_btn.setChecked(False)
-        if not opened and self.batch_solo_btn.isChecked():
-            self.batch_solo_btn.setChecked(False)
-        self.actions_box.setVisible(bool(opened))
-        self.batch_toggle_btn.setText("Batch (B) ON" if opened else "Batch (B)")
-        self._apply_culling_layout_mode()
-
-    def _set_batch_solo_mode(self, enabled: bool) -> None:
-        self.batch_solo_mode = bool(enabled)
-        if self.batch_solo_mode and self.focus_mode_enabled:
-            self.focus_mode_btn.setChecked(False)
-        if self.batch_solo_mode and not self.batch_toggle_btn.isChecked():
-            self.batch_toggle_btn.setChecked(True)
-        self._apply_culling_layout_mode()
-        self.on_job_event("[Tri] Solo Batch active." if self.batch_solo_mode else "[Tri] Solo Batch desactive.")
-
     def _apply_culling_layout_mode(self) -> None:
-        batch_opened = bool(self.actions_box.isVisible())
-        solo_batch = bool(self.batch_solo_mode and batch_opened)
-        hide_chrome = bool(self.focus_mode_enabled or solo_batch)
+        hide_chrome = bool(self.focus_mode_enabled)
         self.controls_box.setVisible(not hide_chrome)
         self.filmstrip_frame.setVisible(not hide_chrome)
 
@@ -3215,7 +3313,6 @@ class CullingTab(QWidget):
 
     def _toggle_overlay_details(self, enabled: bool) -> None:
         self.show_path_overlay = bool(enabled)
-        self.overlay_toggle_btn.setText("Infos chemin (I) ON" if enabled else "Infos chemin (I)")
         self._update_overlay_visibility()
 
     def _update_overlay_visibility(self) -> None:
@@ -3350,64 +3447,22 @@ class CullingTab(QWidget):
 
         rejected_mode = self.rejected_mode_combo.currentData()
         min_rating = int(self.min_rating_filter_combo.currentData() or 0)
-        self.batch_progress.setValue(0)
-        self.batch_cancel_btn.setEnabled(True)
-        self.on_operation_started()
-        self.on_job_event(f"[Tri] Lancement batch sur projet ID {project_id}.")
+    def _on_asset_card_selected(self, asset_id: int) -> None:
+        self._set_selected_asset(asset_id)
+        self._on_select_asset()
 
-        worker = JobWorker(
-            self.culling_service.bulk_update_filtered,
-            project_id=project_id,
-            rejected_mode=rejected_mode,
-            min_rating=min_rating,
-            rating=rating,
-            is_rejected=is_rejected,
-        )
-        thread = QThread(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progress.connect(self._on_batch_progress)
-        worker.result.connect(self._on_batch_result)
-        worker.error.connect(self._on_batch_error)
-        worker.finished.connect(self._on_batch_finished)
-        worker.finished.connect(thread.quit)
-        thread.finished.connect(thread.deleteLater)
-
-        self._job_worker = worker
-        self._job_thread = thread
-        thread.start()
-
-    def _cancel_batch(self) -> None:
-        if self._job_worker is not None:
-            self._job_worker.cancel()
-            self.batch_cancel_btn.setEnabled(False)
-            self.on_job_event("[Tri] Annulation batch demandee par l'utilisateur.")
-
-    def _on_batch_progress(self, done: int, total: int, detail: str) -> None:
-        safe_total = max(1, int(total))
-        self.batch_progress.setMaximum(safe_total)
-        self.batch_progress.setValue(max(0, min(int(done), safe_total)))
-
-    def _on_batch_result(self, result) -> None:
-        self._load_assets()
-        self.on_data_changed()
-        self.on_job_event(f"[Tri] {result.status} | maj={result.updated}/{result.total}")
-        QMessageBox.information(
-            self,
-            "Batch tri",
-            f"Statut: {result.status}\nMAJ: {result.updated}/{result.total}",
-        )
-
-    def _on_batch_error(self, message: str) -> None:
-        self.on_job_event(f"[Tri] Erreur batch: {message}")
-        QMessageBox.critical(self, "Erreur batch tri", message)
-
-    def _on_batch_finished(self) -> None:
-        self.batch_cancel_btn.setEnabled(False)
-        self.on_operation_ended()
-        self._job_worker = None
-        self._job_thread = None
-        self.on_job_event("[Tri] Job batch termine.")
+    def _set_selected_asset(self, asset_id: int | None) -> None:
+        self.selected_asset_id = int(asset_id) if asset_id is not None else None
+        
+        # Sync tinder stars
+        if self.selected_asset_id:
+            asset = self.assets_by_id.get(self.selected_asset_id)
+            if asset:
+                rating = int(getattr(asset, "rating", 0))
+                for i, btn in enumerate(self.star_btns):
+                    btn.blockSignals(True)
+                    btn.setChecked(i < rating)
+                    btn.blockSignals(False)
 
     def closeEvent(self, event) -> None:
         if self._prefetch_manager is not None:
@@ -3442,6 +3497,12 @@ class EditTab(QWidget):
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.timeout.connect(self._save_current_asset_settings)
+        self._autosave_delay = 150 # Faster feel
+        self._render_timer = QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.timeout.connect(self._apply_edit_preview)
+        
+        self._base_image: Image.Image | None = None
         self._form_loading = False
         self._metadata_form_loading = False
         self._before_mode = False
@@ -3457,353 +3518,249 @@ class EditTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
-        controls = QFrame()
-        controls.setObjectName("EditHeaderBar")
-        controls_layout = QHBoxLayout(controls)
-        controls_layout.setContentsMargins(12, 8, 12, 8)
-        controls_layout.setSpacing(8)
         self._selected_project_id: Optional[int] = None
-        # Redundant project selector removed.
 
+        # ── 1. Top Control Bar (Toolbar) ──
+        toolbar_card = BentoCard()
+        toolbar_layout = QHBoxLayout()
+        toolbar_layout.setContentsMargins(12, 4, 12, 4)
+        toolbar_layout.setSpacing(12)
+
+        # Filters Section
+        filter_box = QHBoxLayout(); filter_box.setSpacing(8)
+        vue_lbl = QLabel("Vue:")
+        filter_box.addWidget(vue_lbl)
         self.rejected_mode_combo = QComboBox()
         self.rejected_mode_combo.addItem("A garder", userData="kept")
         self.rejected_mode_combo.addItem("Tout", userData="all")
-        self.rejected_mode_combo.addItem("Rejetees", userData="rejected")
+        self.rejected_mode_combo.addItem("Rejetées", userData="rejected")
+        self.rejected_mode_combo.setFixedWidth(110)
         self.rejected_mode_combo.currentIndexChanged.connect(self._load_assets)
+        filter_box.addWidget(self.rejected_mode_combo)
 
         self.min_rating_filter_combo = QComboBox()
-        for rating in range(0, 6):
-            self.min_rating_filter_combo.addItem(str(rating), userData=rating)
+        for r in range(0, 6): self.min_rating_filter_combo.addItem(f"{r} ★", userData=r)
+        self.min_rating_filter_combo.setFixedWidth(65)
         self.min_rating_filter_combo.currentIndexChanged.connect(self._load_assets)
+        filter_box.addWidget(self.min_rating_filter_combo)
+        toolbar_layout.addLayout(filter_box)
 
-        project_label = QLabel("Projet")
-        project_label.setObjectName("EditFilterLabel")
-        filter_label = QLabel("Filtre")
-        filter_label.setObjectName("EditFilterLabel")
-        rating_label = QLabel("Note min")
-        rating_label.setObjectName("EditFilterLabel")
-        self.panel_focus_label = QLabel("Panneau")
-        self.panel_focus_label.setObjectName("EditFilterLabel")
-        self.panel_focus_combo = QComboBox()
-        self.panel_focus_combo.addItem("Exposition", userData="light")
-        self.panel_focus_combo.addItem("Balance", userData="color")
-        self.panel_focus_combo.addItem("Geometrie", userData="geometry")
-        self.panel_focus_combo.addItem("Actions", userData="actions")
-        self.panel_focus_combo.currentIndexChanged.connect(self._apply_solo_panel_visibility)
-        self.solo_mode_btn = _new_button("Solo mode")
+        toolbar_layout.addSpacing(24)
+        v_sep = QFrame(); v_sep.setFrameShape(QFrame.Shape.VLine); v_sep.setStyleSheet("background: #333; max-width: 1px;"); toolbar_layout.addWidget(v_sep)
+        toolbar_layout.addSpacing(24)
+
+        # Tools Section
+        tools_box = QHBoxLayout(); tools_box.setSpacing(12)
+        self.solo_mode_btn = _new_button("Masquer Collection (F)")
         self.solo_mode_btn.setCheckable(True)
         self.solo_mode_btn.toggled.connect(self._toggle_solo_mode)
-        controls_layout.addWidget(project_label)
-        # controls_layout.addWidget(self.project_combo, 2) # Removed
-        controls_layout.addWidget(filter_label)
-        controls_layout.addWidget(self.rejected_mode_combo)
-        controls_layout.addWidget(rating_label)
-        controls_layout.addWidget(self.min_rating_filter_combo)
-        controls_layout.addWidget(self.panel_focus_label)
-        controls_layout.addWidget(self.panel_focus_combo)
-        controls_layout.addWidget(self.solo_mode_btn)
-        controls_layout.addStretch(1)
-        self._solo_hidden_widgets = [self.rejected_mode_combo, rating_label, self.min_rating_filter_combo]
-        self.panel_focus_label.setVisible(False)
-        self.panel_focus_combo.setVisible(False)
-        layout.addWidget(controls)
+        tools_box.addWidget(self.solo_mode_btn)
+        toolbar_layout.addLayout(tools_box)
+
+        toolbar_layout.addStretch(1)
+        
+        # Shortcuts hint
+        self.hud_hint = QLabel("F = Collection | B = Avant/Après")
+        toolbar_layout.addWidget(self.hud_hint)
+
+        self.panel_focus_label = QLabel() # Stub for compatibility
+        self._solo_hidden_widgets = [
+            vue_lbl, self.rejected_mode_combo, self.min_rating_filter_combo, v_sep
+        ]
+
+        toolbar_card.content_layout.addLayout(toolbar_layout)
+        layout.addWidget(toolbar_card)
 
         body = QSplitter(Qt.Orientation.Horizontal)
         self.body_splitter = body
 
+        # ── 2. Asset Collection (Left) ──
+        collection_card = BentoCard("Collection")
+        self.list_panel = collection_card
+        collection_layout = QVBoxLayout()
+        collection_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.asset_cards_area = QScrollArea()
+        self.asset_cards_area.setWidgetResizable(True)
+        self.asset_cards_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.asset_cards_content = QWidget()
+        self.asset_cards_layout = QVBoxLayout(self.asset_cards_content)
+        self.asset_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.asset_cards_layout.setSpacing(8)
+        self.asset_cards_layout.addStretch(1)
+        self.asset_cards_area.setWidget(self.asset_cards_content)
+        collection_layout.addWidget(self.asset_cards_area)
+        collection_card.content_layout.addLayout(collection_layout)
+        
+        body.addWidget(collection_card)
+        body.setStretchFactor(0, 1)
+
+        # ── 3. Central Working Area (Preview) ──
         center_panel = QWidget()
         center_layout = QVBoxLayout(center_panel)
         center_layout.setContentsMargins(0, 0, 0, 0)
         center_layout.setSpacing(10)
 
-        preview_frame = QFrame()
-        preview_frame.setObjectName("PreviewFrame")
-        preview_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        preview_grid = QGridLayout(preview_frame)
-        preview_grid.setContentsMargins(8, 8, 8, 8)
-        self.preview_label = QLabel("Apercu")
+        preview_card = BentoCard() # Clean preview
+        preview_card.main_layout.setContentsMargins(8, 8, 8, 8)
+        preview_grid = QGridLayout()
+        preview_grid.setContentsMargins(0, 0, 0, 0)
+        
+        self.preview_label = QLabel("Chargement...")
         self.preview_label.setObjectName("PreviewLabel")
-        self.preview_label.setMinimumHeight(340)
-        self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.preview_label.setMinimumHeight(420)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setScaledContents(False)
-        self.before_after_badge = QLabel("AVANT")
-        self.before_after_badge.setObjectName("CullingHud")
-        self.before_after_badge.setProperty("hudState", "info")
-        self.before_after_badge.setVisible(False)
+        self.preview_label.setStyleSheet("background: #0D0D0D; border-radius: 8px;")
+        
+        # HUD Badge for Before/After comparison
+        self.before_after_badge = QLabel("APRES (Edition)")
+        self.before_after_badge.setStyleSheet("""
+            background: rgba(0, 0, 0, 0.6);
+            color: white;
+            padding: 4px 10px;
+            border-bottom-right-radius: 8px;
+            font-size: 10px;
+            font-weight: bold;
+        """)
+        
         preview_grid.addWidget(self.preview_label, 0, 0)
-        preview_grid.addWidget(
-            self.before_after_badge,
-            0,
-            0,
-            alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight,
-        )
-        center_layout.addWidget(preview_frame, 1)
-
-        self.asset_info_label = QLabel("Selection: -")
-        self.asset_info_label.setObjectName("CullingMeta")
-        self.asset_info_label.setVisible(False)
-        center_layout.addWidget(self.asset_info_label)
-
-        self.edit_dock = QFrame()
-        self.edit_dock.setObjectName("EditDock")
-        self.edit_dock.setMinimumHeight(280)
-        self.edit_dock.setMaximumHeight(340)
-        dock_layout = QHBoxLayout(self.edit_dock)
-        dock_layout.setContentsMargins(18, 14, 18, 14)
-        dock_layout.setSpacing(20)
-
-        self.light_box = QGroupBox("EXPOSITION")
-        self.light_box.setObjectName("EditParamGroup")
-        light_layout = QVBoxLayout(self.light_box)
-        light_layout.setContentsMargins(16, 16, 16, 16)
-        light_layout.setSpacing(12)
-        self.exposure_slider = QSlider(Qt.Orientation.Horizontal)
-        self.exposure_slider.setRange(-500, 500)
-        self.exposure_slider.setSingleStep(5)
-        self.exposure_slider.setPageStep(25)
-        self.exposure_value_label = QLabel("+0.00")
-        self.exposure_value_label.setObjectName("EditFieldValue")
-        self.contrast_slider = QSlider(Qt.Orientation.Horizontal)
-        self.contrast_slider.setRange(-100, 100)
-        self.contrast_slider.setSingleStep(1)
-        self.contrast_value_label = QLabel("0")
-        self.contrast_value_label.setObjectName("EditFieldValue")
-        light_layout.addLayout(self._build_slider_row("Exposure", self.exposure_slider, self.exposure_value_label))
-        light_layout.addLayout(self._build_slider_row("Contrast", self.contrast_slider, self.contrast_value_label))
-        light_layout.addStretch(1)
-
-        self.color_box = QGroupBox("BALANCE DES BLANCS")
-        self.color_box.setObjectName("EditParamGroup")
-        color_layout = QVBoxLayout(self.color_box)
-        color_layout.setContentsMargins(16, 16, 16, 16)
-        color_layout.setSpacing(12)
-        self.wb_temp_slider = QSlider(Qt.Orientation.Horizontal)
-        self.wb_temp_slider.setRange(2000, 12000)
-        self.wb_temp_slider.setSingleStep(100)
-        self.wb_temp_slider.setPageStep(300)
-        self.wb_temp_value_label = QLabel("5500K")
-        self.wb_temp_value_label.setObjectName("EditFieldValue")
-        self.wb_tint_slider = QSlider(Qt.Orientation.Horizontal)
-        self.wb_tint_slider.setRange(-100, 100)
-        self.wb_tint_slider.setSingleStep(1)
-        self.wb_tint_value_label = QLabel("+0")
-        self.wb_tint_value_label.setObjectName("EditFieldValue")
-        color_layout.addLayout(self._build_slider_row("WB Temp", self.wb_temp_slider, self.wb_temp_value_label))
-        color_layout.addLayout(self._build_slider_row("WB Tint", self.wb_tint_slider, self.wb_tint_value_label))
-        color_layout.addStretch(1)
-
-        self.geometry_box = QGroupBox("GEOMETRIE")
-        self.geometry_box.setObjectName("EditParamGroup")
-        geometry_layout = QVBoxLayout(self.geometry_box)
-        geometry_layout.setContentsMargins(16, 16, 16, 16)
-        geometry_layout.setSpacing(12)
-        self.crop_ratio_combo = QComboBox()
-        self.crop_ratio_combo.addItems(["original", "1:1", "4:5", "3:2", "16:9"])
-        self.straighten_slider = QSlider(Qt.Orientation.Horizontal)
-        self.straighten_slider.setRange(-450, 450)
-        self.straighten_slider.setSingleStep(1)
-        self.straighten_slider.setPageStep(10)
-        self.straighten_value_label = QLabel("+0.0 deg")
-        self.straighten_value_label.setObjectName("EditFieldValue")
-        geometry_layout.addLayout(self._build_combo_row("Crop", self.crop_ratio_combo))
-        geometry_layout.addLayout(self._build_slider_row("Straighten", self.straighten_slider, self.straighten_value_label))
-        geometry_layout.addStretch(1)
-
-        self.action_box = QGroupBox("ACTIONS")
-        self.action_box.setObjectName("EditActionGroup")
-        self.action_box.setMinimumWidth(320)
-        self.action_box.setMaximumWidth(430)
-        action_root_layout = QVBoxLayout(self.action_box)
-        action_root_layout.setContentsMargins(8, 8, 8, 8)
-        action_root_layout.setSpacing(0)
-        self.action_scroll = QScrollArea()
-        self.action_scroll.setWidgetResizable(True)
-        self.action_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.action_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.action_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        action_content = QWidget()
-        action_layout = QVBoxLayout(action_content)
-        action_layout.setContentsMargins(10, 8, 10, 8)
-        action_layout.setSpacing(8)
-        self.apply_btn = _new_button("Appliquer", primary=True)
-        self.apply_btn.clicked.connect(self._save_current_asset_settings)
-        self.copy_btn = _new_button("Copier reglages")
-        self.copy_btn.clicked.connect(self._copy_current_settings)
-        self.paste_btn = _new_button("Coller reglages")
-        self.paste_btn.clicked.connect(self._paste_to_selected)
-        self.sync_btn = _new_button("Sync filtres")
-        self.sync_btn.clicked.connect(self._start_sync_filtered)
-        self.reset_btn = _new_button("Reset")
-        self.reset_btn.clicked.connect(self._reset_selected_settings)
-        self.before_after_btn = _new_button("A/B")
-        self.before_after_btn.setCheckable(True)
-        self.before_after_btn.setToolTip("Comparer avant/apres (Y)")
-        self.before_after_btn.setMaximumWidth(70)
-        self.before_after_btn.toggled.connect(self._toggle_before_after)
-        self.before_after_btn.setVisible(False)
-        for btn in (self.apply_btn, self.copy_btn, self.paste_btn, self.sync_btn, self.reset_btn, self.before_after_btn):
-            btn.setMinimumHeight(30)
-        action_layout.addWidget(self.apply_btn)
-        action_layout.addWidget(self.copy_btn)
-        action_layout.addWidget(self.paste_btn)
-        action_layout.addWidget(self.reset_btn)
-        action_layout.addWidget(self.before_after_btn)
-
-        self.pro_tools_toggle = QToolButton()
-        self.pro_tools_toggle.setText("Outils avances")
-        self.pro_tools_toggle.setCheckable(True)
-        self.pro_tools_toggle.setChecked(False)
-        self.pro_tools_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.pro_tools_toggle.toggled.connect(self._toggle_pro_tools_panel)
-        action_layout.addWidget(self.pro_tools_toggle)
-
-        self.pro_tools_panel = QWidget()
-        pro_tools_layout = QVBoxLayout(self.pro_tools_panel)
-        pro_tools_layout.setContentsMargins(0, 0, 0, 0)
-        pro_tools_layout.setSpacing(8)
-        pro_tools_layout.addWidget(self.sync_btn)
-
-        metadata_title = QLabel("IPTC / Metadata")
-        metadata_title.setObjectName("CardMuted")
-        pro_tools_layout.addWidget(metadata_title)
-        metadata_form = QFormLayout()
-        metadata_form.setContentsMargins(0, 0, 0, 0)
-        metadata_form.setHorizontalSpacing(8)
-        metadata_form.setVerticalSpacing(6)
-        self.meta_keywords_edit = QLineEdit()
-        self.meta_keywords_edit.setPlaceholderText("keywords (ex: mariage, ceremonie)")
-        self.meta_author_edit = QLineEdit()
-        self.meta_author_edit.setPlaceholderText("Auteur")
-        self.meta_copyright_edit = QLineEdit()
-        self.meta_copyright_edit.setPlaceholderText("Copyright")
-        metadata_form.addRow("Keywords", self.meta_keywords_edit)
-        metadata_form.addRow("Author", self.meta_author_edit)
-        metadata_form.addRow("Copyright", self.meta_copyright_edit)
-        pro_tools_layout.addLayout(metadata_form)
-        metadata_btn_row = QHBoxLayout()
-        self.meta_save_btn = _new_button("Sauver IPTC")
-        self.meta_save_btn.clicked.connect(self._save_selected_metadata)
-        self.meta_sync_btn = _new_button("Sync IPTC filtres")
-        self.meta_sync_btn.clicked.connect(self._sync_selected_metadata_to_filtered)
-        metadata_btn_row.addWidget(self.meta_save_btn)
-        metadata_btn_row.addWidget(self.meta_sync_btn)
-        pro_tools_layout.addLayout(metadata_btn_row)
-        self.exif_info_label = QLabel("EXIF: -")
-        self.exif_info_label.setObjectName("CardMuted")
-        self.exif_info_label.setWordWrap(True)
-        pro_tools_layout.addWidget(self.exif_info_label)
-
-        advanced_header = QHBoxLayout()
-        self.advanced_toggle = QToolButton()
-        self.advanced_toggle.setProperty("cardToggle", "true")
-        self.advanced_toggle.setCheckable(True)
-        self.advanced_toggle.setChecked(False)
-        self.advanced_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.advanced_toggle.setFixedSize(24, 24)
-        advanced_title = QLabel("Ajustements avances")
-        advanced_title.setObjectName("CardMuted")
-        advanced_header.addWidget(advanced_title)
-        advanced_header.addStretch(1)
-        advanced_header.addWidget(self.advanced_toggle)
-        pro_tools_layout.addLayout(advanced_header)
-
-        self.advanced_panel = QWidget()
-        advanced_layout = QVBoxLayout(self.advanced_panel)
-        advanced_layout.setContentsMargins(0, 0, 0, 0)
-        advanced_layout.setSpacing(8)
-        self.highlights_slider = QSlider(Qt.Orientation.Horizontal)
-        self.highlights_slider.setRange(-100, 100)
-        self.highlights_slider.setSingleStep(1)
-        self.highlights_value_label = QLabel("0")
-        self.highlights_value_label.setObjectName("EditFieldValue")
-        self.shadows_slider = QSlider(Qt.Orientation.Horizontal)
-        self.shadows_slider.setRange(-100, 100)
-        self.shadows_slider.setSingleStep(1)
-        self.shadows_value_label = QLabel("0")
-        self.shadows_value_label.setObjectName("EditFieldValue")
-        self.vibrance_slider = QSlider(Qt.Orientation.Horizontal)
-        self.vibrance_slider.setRange(-100, 100)
-        self.vibrance_slider.setSingleStep(1)
-        self.vibrance_value_label = QLabel("0")
-        self.vibrance_value_label.setObjectName("EditFieldValue")
-        self.saturation_slider = QSlider(Qt.Orientation.Horizontal)
-        self.saturation_slider.setRange(-100, 100)
-        self.saturation_slider.setSingleStep(1)
-        self.saturation_value_label = QLabel("0")
-        self.saturation_value_label.setObjectName("EditFieldValue")
-        self.clarity_slider = QSlider(Qt.Orientation.Horizontal)
-        self.clarity_slider.setRange(-100, 100)
-        self.clarity_slider.setSingleStep(1)
-        self.clarity_value_label = QLabel("0")
-        self.clarity_value_label.setObjectName("EditFieldValue")
-        advanced_layout.addLayout(self._build_slider_row("Highlights", self.highlights_slider, self.highlights_value_label))
-        advanced_layout.addLayout(self._build_slider_row("Shadows", self.shadows_slider, self.shadows_value_label))
-        advanced_layout.addLayout(self._build_slider_row("Vibrance", self.vibrance_slider, self.vibrance_value_label))
-        advanced_layout.addLayout(self._build_slider_row("Saturation", self.saturation_slider, self.saturation_value_label))
-        advanced_layout.addLayout(self._build_slider_row("Clarity", self.clarity_slider, self.clarity_value_label))
-        self.advanced_panel.setVisible(False)
-        self.advanced_toggle.toggled.connect(self._toggle_advanced_panel)
-        pro_tools_layout.addWidget(self.advanced_panel)
-
-        self.sync_progress = QProgressBar()
-        self.sync_progress.setMinimum(0)
-        self.sync_progress.setMaximum(100)
-        self.sync_progress.setValue(0)
-        self.sync_cancel_btn = _new_button("Annuler sync")
-        self.sync_cancel_btn.setEnabled(False)
-        self.sync_cancel_btn.clicked.connect(self._cancel_sync)
-        self.sync_cancel_btn.setMinimumHeight(30)
-        pro_tools_layout.addWidget(self.sync_progress)
-        pro_tools_layout.addWidget(self.sync_cancel_btn)
-        self.pro_tools_panel.setVisible(False)
-        action_layout.addWidget(self.pro_tools_panel)
-        action_layout.addStretch(1)
-        self.action_scroll.setWidget(action_content)
-        action_root_layout.addWidget(self.action_scroll, 1)
-        self._edit_panel_widgets = {
-            "light": self.light_box,
-            "color": self.color_box,
-            "geometry": self.geometry_box,
-            "actions": self.action_box,
-        }
-
-        dock_layout.addWidget(self.light_box, 1)
-        dock_layout.addWidget(self.color_box, 1)
-        dock_layout.addWidget(self.geometry_box, 1)
-        dock_layout.addWidget(self.action_box, 0)
-        center_layout.addWidget(self.edit_dock)
-
-        list_panel = QFrame()
-        self.list_panel = list_panel
-        list_panel.setObjectName("EditAssetList")
-        list_panel.setMinimumWidth(280)
-        list_panel.setMaximumWidth(420)
-        list_layout = QVBoxLayout(list_panel)
-        list_layout.setContentsMargins(10, 10, 10, 10)
-        list_layout.setSpacing(8)
-        list_title = QLabel("PHOTOS")
-        list_title.setObjectName("EditAssetListTitle")
-        list_layout.addWidget(list_title)
-        self.asset_cards_area = QScrollArea()
-        self.asset_cards_area.setWidgetResizable(True)
-        self.asset_cards_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.asset_cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.asset_cards_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.asset_cards_content = QWidget()
-        self.asset_cards_layout = QVBoxLayout(self.asset_cards_content)
-        self.asset_cards_layout.setContentsMargins(6, 6, 6, 6)
-        self.asset_cards_layout.setSpacing(10)
-        self.asset_cards_area.setWidget(self.asset_cards_content)
-        list_layout.addWidget(self.asset_cards_area, 1)
-
+        preview_grid.addWidget(self.before_after_badge, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        
+        info_bar = QHBoxLayout(); info_bar.setContentsMargins(12, 0, 12, 0)
+        self.asset_info_label = QLabel("Sélection: -")
+        self.asset_info_label.setObjectName("CardMuted")
+        self.asset_info_label.setStyleSheet("font-family: 'Consolas'; font-size: 11px; background: transparent;")
+        info_bar.addWidget(self.asset_info_label)
+        info_bar.addStretch(1)
+        
+        preview_card.content_layout.addLayout(preview_grid)
+        center_layout.addWidget(preview_card, 1)
+        center_layout.addLayout(info_bar)
+        
         body.addWidget(center_panel)
-        body.addWidget(list_panel)
-        body.setStretchFactor(0, 9)
-        body.setStretchFactor(1, 3)
+        body.setStretchFactor(1, 4)
+
+        # ── 4. Adjustment Column (Right) ──
+        scroll_dock = QScrollArea()
+        self.edit_dock = scroll_dock
+        scroll_dock.setWidgetResizable(True)
+        scroll_dock.setFrameShape(QFrame.Shape.NoFrame)
+        scroll_dock.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_dock.setMinimumWidth(320)
+        scroll_dock.setMaximumWidth(450)
+        
+        dock_container = QWidget()
+        dock_v = QVBoxLayout(dock_container)
+        dock_v.setContentsMargins(0, 0, 8, 0) # Small right margin for beauty
+        dock_v.setSpacing(12)
+
+        # Exposition
+        self.light_box = BentoCard("Exposition")
+        l_layout = QVBoxLayout()
+        self.exposure_slider = QSlider(Qt.Orientation.Horizontal); self.exposure_slider.setRange(-500, 500)
+        self.exposure_value_label = QLabel("+0.00")
+        self.contrast_slider = QSlider(Qt.Orientation.Horizontal); self.contrast_slider.setRange(-100, 100)
+        self.contrast_value_label = QLabel("0")
+        l_layout.addLayout(self._build_slider_row("Expo", self.exposure_slider, self.exposure_value_label))
+        l_layout.addLayout(self._build_slider_row("Contrast", self.contrast_slider, self.contrast_value_label))
+        self.light_box.content_layout.addLayout(l_layout)
+        dock_v.addWidget(self.light_box)
+
+        # Balance
+        self.color_box = BentoCard("Couleur")
+        c_layout = QVBoxLayout()
+        self.wb_temp_slider = QSlider(Qt.Orientation.Horizontal); self.wb_temp_slider.setRange(2000, 12000)
+        self.wb_temp_value_label = QLabel("5500K")
+        self.wb_tint_slider = QSlider(Qt.Orientation.Horizontal); self.wb_tint_slider.setRange(-100, 100)
+        self.wb_tint_value_label = QLabel("+0")
+        c_layout.addLayout(self._build_slider_row("Temp", self.wb_temp_slider, self.wb_temp_value_label))
+        c_layout.addLayout(self._build_slider_row("Tint", self.wb_tint_slider, self.wb_tint_value_label))
+        self.color_box.content_layout.addLayout(c_layout)
+        dock_v.addWidget(self.color_box)
+
+        # Advanced Tools (Collapsible area inside dock)
+        self.pro_tools_panel = BentoCard("Outils Avancés")
+        pro_layout = QVBoxLayout(); pro_layout.setSpacing(10)
+        self.highlights_slider = QSlider(Qt.Orientation.Horizontal); self.highlights_slider.setRange(-100, 100); self.highlights_value_label = QLabel("0")
+        self.shadows_slider = QSlider(Qt.Orientation.Horizontal); self.shadows_slider.setRange(-100, 100); self.shadows_value_label = QLabel("0")
+        self.vibrance_slider = QSlider(Qt.Orientation.Horizontal); self.vibrance_slider.setRange(-100, 100); self.vibrance_value_label = QLabel("0")
+        self.saturation_slider = QSlider(Qt.Orientation.Horizontal); self.saturation_slider.setRange(-100, 100); self.saturation_value_label = QLabel("0")
+        self.clarity_slider = QSlider(Qt.Orientation.Horizontal); self.clarity_slider.setRange(-100, 100); self.clarity_value_label = QLabel("0")
+        pro_layout.addLayout(self._build_slider_row("H-Lts", self.highlights_slider, self.highlights_value_label))
+        pro_layout.addLayout(self._build_slider_row("Shds", self.shadows_slider, self.shadows_value_label))
+        pro_layout.addLayout(self._build_slider_row("Vibr", self.vibrance_slider, self.vibrance_value_label))
+        pro_layout.addLayout(self._build_slider_row("Sat", self.saturation_slider, self.saturation_value_label))
+        pro_layout.addLayout(self._build_slider_row("Clar", self.clarity_slider, self.clarity_value_label))
+        self.pro_tools_panel.content_layout.addLayout(pro_layout)
+        self.pro_tools_panel.setVisible(False)
+        dock_v.addWidget(self.pro_tools_panel)
+
+        # Geometry
+        self.geometry_box = BentoCard("Géométrie")
+        g_layout = QVBoxLayout()
+        self.crop_ratio_combo = QComboBox(); self.crop_ratio_combo.addItems(["original", "1:1", "4:5", "3:2", "16:9"])
+        self.straighten_slider = QSlider(Qt.Orientation.Horizontal); self.straighten_slider.setRange(-450, 450); self.straighten_value_label = QLabel("+0.0 deg")
+        g_layout.addLayout(self._build_combo_row("Format", self.crop_ratio_combo))
+        g_layout.addLayout(self._build_slider_row("Angle", self.straighten_slider, self.straighten_value_label))
+        self.geometry_box.content_layout.addLayout(g_layout)
+        dock_v.addWidget(self.geometry_box)
+
+        # Actions (Simplified)
+        self.action_box = BentoCard("Actions")
+        a_layout = QVBoxLayout()
+        self.reset_btn = _new_button("Réinitialiser d'origine"); self.reset_btn.clicked.connect(self._reset_selected_settings)
+        self.pro_tools_toggle = _new_button("Afficher Options Avancées"); self.pro_tools_toggle.setCheckable(True); self.pro_tools_toggle.toggled.connect(self._toggle_pro_tools_panel)
+        a_layout.addWidget(self.reset_btn)
+        a_layout.addWidget(self.pro_tools_toggle)
+        self.action_box.content_layout.addLayout(a_layout)
+        dock_v.addWidget(self.action_box)
+        dock_v.addStretch(1)
+
+        scroll_dock.setWidget(dock_container)
+        body.addWidget(scroll_dock)
+        body.setStretchFactor(2, 1)
+        
         layout.addWidget(body, 1)
+
+        # ── 5. Metadata Panel (Optional bottom bar) ──
+        metadata_card = BentoCard("Métadonnées IPTC")
+        metadata_card.setVisible(False)
+        self.pro_metadata_panel = metadata_card
+        meta_layout = QHBoxLayout()
+        meta_layout.setSpacing(12)
+        self.meta_keywords_edit = QLineEdit(); self.meta_keywords_edit.setPlaceholderText("Mots-clés...")
+        self.meta_author_edit = QLineEdit(); self.meta_author_edit.setPlaceholderText("Artiste...")
+        self.meta_copyright_edit = QLineEdit(); self.meta_copyright_edit.setPlaceholderText("Copyright...")
+        self.meta_save_btn = _new_button("Mettre à jour IPTC")
+        self.meta_save_btn.clicked.connect(self._save_selected_metadata)
+        
+        meta_layout.addWidget(self.meta_keywords_edit, 2)
+        meta_layout.addWidget(self.meta_author_edit, 1)
+        meta_layout.addWidget(self.meta_copyright_edit, 1)
+        meta_layout.addWidget(self.meta_save_btn)
+        metadata_card.content_layout.addLayout(meta_layout)
+        layout.addWidget(metadata_card)
+
+        # Status Bar Bottom
+        self.status_bar_area = QWidget()
+        s_layout = QHBoxLayout(self.status_bar_area)
+        self.sync_progress = QProgressBar(); self.sync_progress.setFixedHeight(4); self.sync_progress.setTextVisible(False)
+        self.sync_cancel_btn = _new_button("Quitter", primary=False)
+        self.sync_cancel_btn.setFixedSize(60, 24)
+        self.sync_cancel_btn.clicked.connect(self._cancel_sync)
+        self.sync_progress.setVisible(False)
+        self.sync_cancel_btn.setVisible(False)
+        s_layout.addWidget(self.sync_progress, 1)
+        s_layout.addWidget(self.sync_cancel_btn)
+        layout.addWidget(self.status_bar_area)
+
+        # Legacy stubs / References
+        self._edit_panel_widgets = { "light": self.light_box, "color": self.color_box, "geometry": self.geometry_box, "actions": self.action_box }
+        self.exif_info_label = QLabel() # Stub for compatibility
+        self.advanced_panel = QWidget(); self.advanced_toggle = QToolButton(); self.meta_sync_btn = QWidget()
+        self.action_scroll = QWidget(); self.before_after_btn = QWidget()
 
         self._connect_form_signals()
         self._build_shortcuts()
@@ -3811,28 +3768,23 @@ class EditTab(QWidget):
         self._apply_before_after_state()
 
     def _connect_form_signals(self) -> None:
-        self.exposure_slider.valueChanged.connect(self._schedule_autosave)
-        self.exposure_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.wb_temp_slider.valueChanged.connect(self._schedule_autosave)
-        self.wb_temp_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.wb_tint_slider.valueChanged.connect(self._schedule_autosave)
-        self.wb_tint_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.crop_ratio_combo.currentIndexChanged.connect(self._schedule_autosave)
-        self.straighten_slider.valueChanged.connect(self._schedule_autosave)
-        self.straighten_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.contrast_slider.valueChanged.connect(self._schedule_autosave)
-        self.contrast_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.highlights_slider.valueChanged.connect(self._schedule_autosave)
-        self.highlights_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.shadows_slider.valueChanged.connect(self._schedule_autosave)
-        self.shadows_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.vibrance_slider.valueChanged.connect(self._schedule_autosave)
-        self.vibrance_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.saturation_slider.valueChanged.connect(self._schedule_autosave)
-        self.saturation_slider.valueChanged.connect(self._update_edit_value_labels)
-        self.clarity_slider.valueChanged.connect(self._schedule_autosave)
-        self.clarity_slider.valueChanged.connect(self._update_edit_value_labels)
+        for slider in [
+            self.exposure_slider, self.wb_temp_slider, self.wb_tint_slider,
+            self.straighten_slider, self.contrast_slider, self.highlights_slider,
+            self.shadows_slider, self.vibrance_slider, self.saturation_slider,
+            self.clarity_slider
+        ]:
+            slider.valueChanged.connect(self._on_param_changed)
+        
+        self.crop_ratio_combo.currentIndexChanged.connect(self._on_param_changed)
         self._update_edit_value_labels()
+
+    def _on_param_changed(self, *_args) -> None:
+        if self._form_loading:
+            return
+        self._update_edit_value_labels()
+        self._schedule_autosave()
+        self._render_timer.start(30) # High-speed preview render
 
     def _build_slider_row(self, label_text: str, slider: QSlider, value_label: QLabel) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -3840,12 +3792,11 @@ class EditTab(QWidget):
         row.setSpacing(12)
         field_label = QLabel(label_text)
         field_label.setObjectName("EditFieldLabel")
-        field_label.setFixedWidth(82)
+        field_label.setFixedWidth(70)
         value_label.setObjectName("EditFieldValue")
         value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        value_label.setFixedWidth(78)
-        slider.setMinimumWidth(170)
-        slider.setMinimumHeight(20)
+        value_label.setFixedWidth(65)
+        slider.setMinimumHeight(24)
         row.addWidget(field_label)
         row.addWidget(slider, 1)
         row.addWidget(value_label)
@@ -3875,17 +3826,7 @@ class EditTab(QWidget):
         self.clarity_value_label.setText(f"{int(self.clarity_slider.value()):+d}")
 
     def _build_shortcuts(self) -> None:
-        copy_shortcut = QShortcut(QKeySequence("Ctrl+C"), self)
-        copy_shortcut.activated.connect(self._copy_current_settings)
-        self._shortcut_refs.append(copy_shortcut)
-
-        paste_shortcut = QShortcut(QKeySequence("Ctrl+V"), self)
-        paste_shortcut.activated.connect(self._paste_to_selected)
-        self._shortcut_refs.append(paste_shortcut)
-
-        apply_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
-        apply_shortcut.activated.connect(self._save_current_asset_settings)
-        self._shortcut_refs.append(apply_shortcut)
+        # Manual save removed (autosave is active)
 
         sync_shortcut = QShortcut(QKeySequence("Shift+S"), self)
         sync_shortcut.activated.connect(self._start_sync_filtered)
@@ -3894,6 +3835,10 @@ class EditTab(QWidget):
         solo_shortcut = QShortcut(QKeySequence("F"), self)
         solo_shortcut.activated.connect(lambda: self.solo_mode_btn.setChecked(not self.solo_mode_btn.isChecked()))
         self._shortcut_refs.append(solo_shortcut)
+        
+        ba_shortcut = QShortcut(QKeySequence("B"), self)
+        ba_shortcut.activated.connect(lambda: self._toggle_before_after(not self._before_mode))
+        self._shortcut_refs.append(ba_shortcut)
 
     def refresh_data(self) -> None:
         self._load_assets()
@@ -3903,39 +3848,23 @@ class EditTab(QWidget):
         self._load_assets()
 
     def _toggle_advanced_panel(self, opened: bool) -> None:
-        self.advanced_panel.setVisible(opened)
-        self.advanced_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+        self.pro_metadata_panel.setVisible(opened)
 
     def _toggle_pro_tools_panel(self, opened: bool) -> None:
         self.pro_tools_panel.setVisible(bool(opened))
-        self.pro_tools_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
 
     def _toggle_solo_mode(self, enabled: bool) -> None:
         self._solo_mode_enabled = bool(enabled)
         for widget in self._solo_hidden_widgets:
             widget.setVisible(not self._solo_mode_enabled)
-        self.panel_focus_label.setVisible(self._solo_mode_enabled)
-        self.panel_focus_combo.setVisible(self._solo_mode_enabled)
         self.list_panel.setVisible(not self._solo_mode_enabled)
+        
         if self._solo_mode_enabled:
-            self.preview_label.setMinimumHeight(460)
-            total = max(1, int(self.body_splitter.width()))
-            self.body_splitter.setSizes([total, 0])
-            self.pro_tools_toggle.setChecked(False)
-            self.advanced_toggle.setChecked(False)
+            self.preview_label.setMinimumHeight(440)
         else:
-            self.preview_label.setMinimumHeight(340)
-            self.reset_layout_after_shell_resize()
-        self._apply_solo_panel_visibility()
-
-    def _apply_solo_panel_visibility(self) -> None:
-        if not self._solo_mode_enabled:
-            for panel in self._edit_panel_widgets.values():
-                panel.setVisible(True)
-            return
-        selected_key = str(self.panel_focus_combo.currentData() or "light")
-        for key, panel in self._edit_panel_widgets.items():
-            panel.setVisible(key == selected_key)
+            self.preview_label.setMinimumHeight(380)
+            
+        self.reset_layout_after_shell_resize()
 
     def _toggle_before_after(self, enabled: bool) -> None:
         self._before_mode = bool(enabled)
@@ -3943,19 +3872,20 @@ class EditTab(QWidget):
 
     def _apply_before_after_state(self) -> None:
         if self._before_mode:
-            self.before_after_badge.setText("APRES")
-            self.before_after_badge.setProperty("hudState", "ok")
-        else:
-            self.before_after_badge.setText("AVANT")
+            self.before_after_badge.setText("AVANT (Original)")
             self.before_after_badge.setProperty("hudState", "info")
+        else:
+            self.before_after_badge.setText("APRES (Edition)")
+            self.before_after_badge.setProperty("hudState", "ok")
         self.before_after_badge.style().unpolish(self.before_after_badge)
         self.before_after_badge.style().polish(self.before_after_badge)
         self.before_after_badge.update()
+        self._render_timer.start(0)
 
     def _schedule_autosave(self, *_args) -> None:
         if self._form_loading:
             return
-        self._autosave_timer.start(220)
+        self._autosave_timer.start(self._autosave_delay)
 
     def _load_assets(self) -> None:
         project_id = self._selected_project_id
@@ -4050,7 +3980,7 @@ class EditTab(QWidget):
         select_btn.setMinimumHeight(30)
         select_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         select_btn.clicked.connect(lambda _checked=False, asset_id=asset.id: self._on_asset_card_selected(asset_id))
-        badge = QLabel(f"R{int(asset.rating)}")
+        badge = QLabel(f"{int(asset.rating)} ★")
         badge.setObjectName("CardBadge")
         header_row.addWidget(select_btn, 1)
         header_row.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
@@ -4089,8 +4019,10 @@ class EditTab(QWidget):
             stale = self._thumb_cache_order.pop(0)
             self._thumb_cache.pop(stale, None)
         return thumb
-
     def _on_asset_card_selected(self, asset_id: int) -> None:
+        if self._autosave_timer.isActive():
+            self._autosave_timer.stop()
+            self._save_current_asset_settings()
         self._set_selected_asset(asset_id)
         self._on_select_asset()
 
@@ -4134,46 +4066,142 @@ class EditTab(QWidget):
             return
 
         file_path = Path(str(asset.src_path)) if asset.src_path else None
+        self._base_image = None
         if file_path is None or not file_path.exists():
             self.preview_label.setPixmap(QPixmap())
             self.preview_label.setText("Fichier introuvable")
-        else:
-            pixmap = QPixmap(str(file_path))
-            if pixmap.isNull():
-                self.preview_label.setPixmap(QPixmap())
-                self.preview_label.setText("Apercu indisponible")
-            else:
+        elif PIL_AVAILABLE:
+            try:
+                with Image.open(file_path) as img:
+                    # Work on a reasonably sized preview for real-time performance
+                    # but large enough for clarity.
+                    max_dim = 1600
+                    if img.width > max_dim or img.height > max_dim:
+                        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+                    self._base_image = img.convert("RGBA")
                 self.preview_label.setText("")
-                scaled = pixmap.scaled(
-                    self.preview_label.size(),
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation,
-                )
-                self.preview_label.setPixmap(scaled)
+            except Exception:
+                self.preview_label.setPixmap(QPixmap())
+                self.preview_label.setText("Erreur lecture PIL")
+        else:
+            self.preview_label.setText("PIL non disponible")
 
         rejected = "oui" if bool(asset.is_rejected) else "non"
         self.asset_info_label.setText(
-            f"Selection: {asset.file_name} | note={int(asset.rating)} | rejet={rejected}"
+            f"Selection: {asset.file_name} | {int(asset.rating)} ★ | rejet={rejected}"
         )
         self._apply_settings_to_form(asset.edit_settings)
         self._load_selected_metadata()
+        self._render_timer.start(0) # Initial render
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._on_select_asset()
+        if self._base_image:
+            self._render_timer.start(0)
+        else:
+            self._on_select_asset()
 
     def reset_layout_after_shell_resize(self) -> None:
         splitter = getattr(self, "body_splitter", None)
         if splitter is None:
             return
-        if self._solo_mode_enabled:
-            total = max(1, int(splitter.width()))
-            splitter.setSizes([total, 0])
-            return
+            
         total = max(1, int(splitter.width()))
-        right = min(420, max(280, int(total * 0.24)))
-        left = max(420, total - right)
-        splitter.setSizes([left, right])
+        right_w = 350
+        
+        if self._solo_mode_enabled:
+            # Hide left (collection), keep center and right (tools)
+            center_w = max(400, total - right_w)
+            splitter.setSizes([0, center_w, right_w])
+        else:
+            # Show all three modules
+            left_w = 280
+            center_w = max(400, total - (left_w + right_w))
+            splitter.setSizes([left_w, center_w, right_w])
+
+    def _apply_edit_preview(self) -> None:
+        if not PIL_AVAILABLE or self._base_image is None:
+            return
+            
+        settings = self._collect_form_settings()
+        
+        # If Before Mode is active, we bypass processing
+        if self._before_mode:
+            self._display_pil_image(self._base_image)
+            return
+
+        # Start from base
+        img = self._base_image.copy()
+
+        # 1. Geometry (Rotate) - Apply first before heavy pixel work
+        angle = float(settings.get("straighten", 0.0))
+        if abs(angle) > 0.01:
+            img = img.rotate(-angle, expand=True, resample=Image.Resampling.BICUBIC)
+
+        # 2. Exposure (Approximate using Brightness)
+        expo = float(settings.get("exposure", 0.0))
+        if abs(expo) > 0.001:
+            factor = pow(1.8, expo) # Adjust base to feel natural
+            img = ImageEnhance.Brightness(img).enhance(factor)
+
+        # 3. Contrast
+        contrast = int(settings.get("contrast", 0))
+        if contrast != 0:
+            factor = 1.0 + (contrast / 100.0)
+            img = ImageEnhance.Contrast(img).enhance(factor)
+
+        # 4. White Balance (Simplified RGB multipliers)
+        temp = int(settings.get("wb_temp", 5500))
+        tint = int(settings.get("wb_tint", 0))
+        if temp != 5500 or tint != 0:
+             # Temp approx: Higher = Warmer (More Red/Yellow), Lower = Cooler (More Blue)
+             r_m = 1.0 + (temp - 5500) / 12000.0
+             b_m = 1.0 - (temp - 5500) / 12000.0
+             g_m = 1.0 - (tint / 300.0)
+             # Basic color transform matrix
+             matrix = (r_m, 0, 0, 0,
+                       0, g_m, 0, 0,
+                       0, 0, b_m, 0)
+             img = img.convert("RGB").convert("RGB", matrix).convert("RGBA")
+
+        # 5. Advanced (Highlights / Shadows) - Simplified via Gamma/Brightness logic for now
+        hl = int(settings.get("highlights", 0))
+        sh = int(settings.get("shadows", 0))
+        if hl != 0 or sh != 0:
+            # Very simple fake HL/SH for preview speed
+            total_corr = (sh * 0.3) + (hl * 0.1)
+            if abs(total_corr) > 1:
+                img = ImageEnhance.Brightness(img).enhance(1.0 + total_corr/100.0)
+
+        # 6. Saturation / Vibrance
+        sat = int(settings.get("saturation", 0))
+        vib = int(settings.get("vibrance", 0))
+        factor = 1.0 + ((sat + vib * 0.6) / 100.0)
+        if abs(factor - 1.0) > 0.01:
+            img = ImageEnhance.Color(img).enhance(factor)
+
+        # 7. Clarity (Sharpness)
+        clarity = int(settings.get("clarity", 0))
+        if clarity != 0:
+            factor = 1.0 + (clarity / 50.0)
+            img = ImageEnhance.Sharpness(img).enhance(factor)
+
+        self._display_pil_image(img)
+
+    def _display_pil_image(self, img: Image.Image) -> None:
+        if img is None: return
+        
+        # Convert PIL to QPixmap
+        qimg = ImageQt(img)
+        pixmap = QPixmap.fromImage(qimg)
+        
+        # Scale to label size
+        scaled = pixmap.scaled(
+            self.preview_label.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_label.setPixmap(scaled)
 
     def _apply_settings_to_form(self, settings: dict[str, object]) -> None:
         payload = dict(DEFAULT_EDIT_SETTINGS)
@@ -4462,143 +4490,109 @@ class ExportTab(QWidget):
         self._queue_items: list[ExportQueueItem] = []
 
         layout = QVBoxLayout(self)
-
-        controls = QGroupBox("Export multi-profils")
-        controls_layout = QFormLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
 
         self._selected_project_id: Optional[int] = None
-        # Redundant project selector removed.
 
-        destination_row = QHBoxLayout()
+        # ── 1. Top Control Bar ──
+        top_card = BentoCard("Configuration de l'export")
+        top_layout = QHBoxLayout()
+        top_layout.setContentsMargins(12, 4, 12, 4)
+        top_layout.setSpacing(12)
+
+        top_layout.addWidget(QLabel("Dossier Destination:"))
         self.destination_edit = QLineEdit()
-        self.destination_edit.setPlaceholderText("Dossier de sortie")
+        self.destination_edit.setPlaceholderText("Dossier de sortie pour les exports...")
         browse_btn = _new_button("Parcourir")
+        browse_btn.setFixedWidth(100)
         browse_btn.clicked.connect(self._pick_destination)
-        destination_row.addWidget(self.destination_edit)
-        destination_row.addWidget(browse_btn)
+        
+        top_layout.addWidget(self.destination_edit, 1)
+        top_layout.addWidget(browse_btn)
+
+        self.run_btn = _new_button("Exporter", primary=True)
+        self.run_btn.setFixedWidth(120)
+        self.run_btn.clicked.connect(self._run_export)
+        top_layout.addWidget(self.run_btn)
+
+        top_card.content_layout.addLayout(top_layout)
+        layout.addWidget(top_card)
+
+        # ── 2. Settings & Health Grid ──
+        grid_row = QHBoxLayout()
+        grid_row.setSpacing(10)
+
+        # 2a. Export Settings
+        settings_card = BentoCard("Paramètres d'export")
+        settings_form = QFormLayout()
+        settings_form.setSpacing(10)
 
         profiles_row = QHBoxLayout()
-        self.web_check = QCheckBox("web")
-        self.web_check.setChecked(True)
-        self.print_check = QCheckBox("print")
-        self.print_check.setChecked(True)
-        self.social_check = QCheckBox("social")
-        self.social_check.setChecked(True)
-        profiles_row.addWidget(self.web_check)
-        profiles_row.addWidget(self.print_check)
-        profiles_row.addWidget(self.social_check)
+        self.web_check = QCheckBox("Web")
+        self.print_check = QCheckBox("Impression")
+        self.social_check = QCheckBox("Social")
+        for cb in (self.web_check, self.print_check, self.social_check):
+            cb.setChecked(True)
+            profiles_row.addWidget(cb)
+        settings_form.addRow("Profils:", profiles_row)
 
         self.min_rating_combo = QComboBox()
         for rating in range(0, 6):
             self.min_rating_combo.addItem(str(rating), userData=rating)
         self.min_rating_combo.currentIndexChanged.connect(self._on_min_rating_changed)
+        settings_form.addRow("Note Minimum:", self.min_rating_combo)
 
-        quality_widget = QWidget()
-        quality_layout = QVBoxLayout(quality_widget)
-        quality_layout.setContentsMargins(0, 0, 0, 0)
-        quality_layout.setSpacing(4)
+        delivery_layout = QVBoxLayout()
+        self.zip_check = QCheckBox("Créer une archive ZIP")
+        self.report_check = QCheckBox("Générer rapport .txt")
+        self.contact_sheet_check = QCheckBox("Planche contact PDF")
+        for cb in (self.zip_check, self.report_check, self.contact_sheet_check):
+            cb.setChecked(True)
+            delivery_layout.addWidget(cb)
+        settings_form.addRow("Options:", delivery_layout)
 
-        quality_top = QHBoxLayout()
-        quality_top.setContentsMargins(0, 0, 0, 0)
-        quality_top.setSpacing(8)
+        settings_card.content_layout.addLayout(settings_form)
+        grid_row.addWidget(settings_card, 1)
+
+        # 2b. Project Health (Checklist)
+        health_card = BentoCard("Santé du Projet (Checklist)")
+        health_layout = QVBoxLayout()
+        
         self.quality_state_label = QLabel("Checklist: -")
         self.quality_state_label.setObjectName("CardValue")
-        self.quality_verify_btn = _new_button("Verifier checklist")
+        self.quality_state_label.setStyleSheet("font-size: 16px; font-weight: bold; background: transparent;")
+        
+        self.quality_summary_container = QWidget()
+        self.quality_summary_layout = QHBoxLayout(self.quality_summary_container)
+        self.quality_summary_layout.setContentsMargins(0, 0, 0, 0)
+        self.quality_summary_layout.setSpacing(6)
+        
+        health_layout.addWidget(self.quality_state_label)
+        health_layout.addWidget(self.quality_summary_container)
+        health_layout.addStretch(1)
+
+        health_btns = QHBoxLayout()
+        self.quality_verify_btn = _new_button("Vérifier")
         self.quality_verify_btn.clicked.connect(self._verify_quality_gate)
-        self.quality_validate_btn = _new_button("Valider checklist projet")
+        self.quality_validate_btn = _new_button("Valider")
         self.quality_validate_btn.clicked.connect(self._validate_quality_gate)
-        quality_top.addWidget(self.quality_state_label)
-        quality_top.addStretch(1)
-        quality_top.addWidget(self.quality_verify_btn)
-        quality_top.addWidget(self.quality_validate_btn)
-        quality_layout.addLayout(quality_top)
+        health_btns.addWidget(self.quality_verify_btn)
+        health_btns.addWidget(self.quality_validate_btn)
+        health_layout.addLayout(health_btns)
 
-        self.quality_summary_label = QLabel("Resume checklist: -")
-        self.quality_summary_label.setObjectName("CardMuted")
-        self.quality_summary_label.setWordWrap(True)
-        quality_layout.addWidget(self.quality_summary_label)
+        health_card.content_layout.addLayout(health_layout)
+        grid_row.addWidget(health_card, 1)
 
-        delivery_row = QHBoxLayout()
-        self.zip_check = QCheckBox("ZIP livraison")
-        self.zip_check.setChecked(True)
-        self.report_check = QCheckBox("Rapport .txt")
-        self.report_check.setChecked(True)
-        self.contact_sheet_check = QCheckBox("Planche contact PDF")
-        self.contact_sheet_check.setChecked(True)
-        delivery_row.addWidget(self.zip_check)
-        delivery_row.addWidget(self.report_check)
-        delivery_row.addWidget(self.contact_sheet_check)
+        layout.addLayout(grid_row)
 
-        self.run_btn = _new_button("Lancer export", primary=True)
-        self.run_btn.clicked.connect(self._run_export)
-        self.queue_add_btn = _new_button("Ajouter file")
-        self.queue_add_btn.clicked.connect(self._enqueue_current_export)
-        self.start_queue_btn = _new_button("Lancer file")
-        self.start_queue_btn.clicked.connect(self._start_next_queue_item)
-        self.cancel_btn = _new_button("Annuler")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._cancel_export)
-        self.queue_controls_toggle = QToolButton()
-        self.queue_controls_toggle.setText("File avancee")
-        self.queue_controls_toggle.setCheckable(True)
-        self.queue_controls_toggle.setChecked(False)
-        self.queue_controls_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.queue_controls_toggle.toggled.connect(self._toggle_advanced_queue_controls)
-
-        run_row = QHBoxLayout()
-        run_row.addWidget(self.run_btn)
-        run_row.addWidget(self.cancel_btn)
-        run_row.addStretch(1)
-        run_row.addWidget(self.queue_controls_toggle)
-
-        self.queue_controls_panel = QWidget()
-        queue_controls_layout = QHBoxLayout(self.queue_controls_panel)
-        queue_controls_layout.setContentsMargins(0, 0, 0, 0)
-        queue_controls_layout.setSpacing(8)
-        queue_controls_layout.addStretch(1)
-        queue_controls_layout.addWidget(self.queue_add_btn)
-        queue_controls_layout.addWidget(self.start_queue_btn)
-        self.queue_controls_panel.setVisible(False)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setValue(0)
-        self.eta_label = QLabel("ETA: -")
-        self.eta_label.setObjectName("CullingMeta")
-
-        # controls_layout.addRow("Projet", self.project_combo) # Removed
-        controls_layout.addRow("Destination", destination_row)
-        controls_layout.addRow("Profils", profiles_row)
-        controls_layout.addRow("Note min", self.min_rating_combo)
-        controls_layout.addRow("Checklist", quality_widget)
-        controls_layout.addRow("Livraison", delivery_row)
-        controls_layout.addRow("", run_row)
-        controls_layout.addRow("", self.queue_controls_panel)
-        controls_layout.addRow("Progression", self.progress_bar)
-        controls_layout.addRow("", self.eta_label)
-
-        layout.addWidget(controls)
-
-        self.queue_section_toggle = QToolButton()
-        self.queue_section_toggle.setText("Queue et logs")
-        self.queue_section_toggle.setCheckable(True)
-        self.queue_section_toggle.setChecked(False)
-        self.queue_section_toggle.setArrowType(Qt.ArrowType.RightArrow)
-        self.queue_section_toggle.toggled.connect(self._toggle_queue_section)
-        layout.addWidget(self.queue_section_toggle)
-
-        self.queue_section_widget = QWidget()
-        queue_section_layout = QVBoxLayout(self.queue_section_widget)
-        queue_section_layout.setContentsMargins(0, 0, 0, 0)
-        queue_section_layout.setSpacing(8)
-
-        self.queue_box = QGroupBox("File d'attente exports")
-        queue_layout = QVBoxLayout(self.queue_box)
-
+        # ── 3. Queue ──
+        self.queue_box = BentoCard("File d'attente des exports")
+        queue_layout = QVBoxLayout()
+        
         queue_header = QHBoxLayout()
-        self.queue_state_label = QLabel("Queue: idle")
-        self.queue_counts_label = QLabel("pending=0 | running=0 | done=0 | failed=0")
+        self.queue_state_label = QLabel("Prêt")
+        self.queue_counts_label = QLabel("Total: 0")
         self.queue_counts_label.setObjectName("CullingMeta")
         queue_header.addWidget(self.queue_state_label)
         queue_header.addStretch(1)
@@ -4606,13 +4600,21 @@ class ExportTab(QWidget):
         queue_layout.addLayout(queue_header)
 
         queue_actions = QHBoxLayout()
-        self.pause_queue_btn = _new_button("Pause file")
+        self.queue_add_btn = _new_button("Ajouter à la file")
+        self.queue_add_btn.clicked.connect(self._enqueue_current_export)
+        self.start_queue_btn = _new_button("Lancer la file")
+        self.start_queue_btn.clicked.connect(self._start_next_queue_item)
+        self.pause_queue_btn = _new_button("Pause")
         self.pause_queue_btn.setCheckable(True)
         self.pause_queue_btn.toggled.connect(self._toggle_queue_pause)
-        self.retry_failed_btn = _new_button("Retry fails")
+        self.retry_failed_btn = _new_button("Réessayer erreurs")
         self.retry_failed_btn.clicked.connect(self._retry_failed_queue_items)
-        self.clear_completed_btn = _new_button("Vider termines")
+        self.clear_completed_btn = _new_button("Vider l'historique")
         self.clear_completed_btn.clicked.connect(self._clear_completed_queue_items)
+        
+        queue_actions.addWidget(self.queue_add_btn)
+        queue_actions.addWidget(self.start_queue_btn)
+        queue_actions.addSpacing(20)
         queue_actions.addWidget(self.pause_queue_btn)
         queue_actions.addWidget(self.retry_failed_btn)
         queue_actions.addWidget(self.clear_completed_btn)
@@ -4622,21 +4624,45 @@ class ExportTab(QWidget):
         self.queue_cards_area = QScrollArea()
         self.queue_cards_area.setWidgetResizable(True)
         self.queue_cards_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.queue_cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.queue_cards_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.queue_cards_area.setMinimumHeight(150)
         self.queue_cards_content = QWidget()
         self.queue_cards_layout = QVBoxLayout(self.queue_cards_content)
-        self.queue_cards_layout.setContentsMargins(4, 4, 4, 4)
-        self.queue_cards_layout.setSpacing(8)
+        self.queue_cards_layout.setContentsMargins(0, 0, 0, 0)
+        self.queue_cards_layout.setSpacing(4)
         self.queue_cards_area.setWidget(self.queue_cards_content)
         queue_layout.addWidget(self.queue_cards_area)
-        queue_section_layout.addWidget(self.queue_box)
 
-        self.log_text = QPlainTextEdit()
-        self.log_text.setReadOnly(True)
-        queue_section_layout.addWidget(self.log_text)
-        self.queue_section_widget.setVisible(False)
-        layout.addWidget(self.queue_section_widget, 1)
+        self.queue_box.content_layout.addLayout(queue_layout)
+        layout.addWidget(self.queue_box, 1)
+
+        # ── 4. Progress Area ──
+        progress_container = QWidget()
+        progress_layout = QVBoxLayout(progress_container)
+        progress_layout.setContentsMargins(10, 0, 10, 10)
+        progress_layout.setSpacing(4)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setMinimum(0)
+        self.progress_bar.setMaximum(100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFixedHeight(8)
+        self.progress_bar.setTextVisible(False)
+
+        self.eta_label = QLabel("En attente...")
+        self.eta_label.setObjectName("CullingMeta")
+        self.eta_label.setStyleSheet("color: #94A3B8; font-size: 11px; background: transparent;")
+
+        progress_layout.addWidget(self.progress_bar)
+        progress_layout.addWidget(self.eta_label)
+        layout.addWidget(progress_container)
+
+        # Removed redundant cancel_btn and log_text visibility handling
+        self.cancel_btn = QWidget() # Dummy for internal compatibility
+        self.log_text = QPlainTextEdit() # Keeping it for log output even if hidden
+        self.log_text.setVisible(False)
+
+        # Toggles and secondary panels removed and integrated or hidden
+        pass
 
         if self.job_queue_service is not None:
             recovered = self.job_queue_service.recover_stale_running_jobs(stale_after_seconds=90)
@@ -4700,22 +4726,38 @@ class ExportTab(QWidget):
         return mapping.get(str(state), str(state))
 
     def _set_quality_banner(self, snapshot: dict | None) -> None:
+        # Clear tags
+        while self.quality_summary_layout.count():
+            item = self.quality_summary_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
         if not snapshot:
             self.quality_state_label.setText("Checklist: -")
-            self.quality_summary_label.setText("Resume checklist: -")
+            self.quality_summary_layout.addWidget(_new_tag_label("Résumé: -", "#6B7280"))
+            self.quality_summary_layout.addStretch()
             return
+
         state = self._quality_state_text(str(snapshot.get("status", "not_validated")))
         summary = snapshot.get("summary", {}) if isinstance(snapshot.get("summary"), dict) else {}
         exportable = int(summary.get("exportable_count", 0) or 0)
         missing_author = int(summary.get("missing_author_count", 0) or 0)
         missing_copyright = int(summary.get("missing_copyright_count", 0) or 0)
+        
         self.quality_state_label.setText(f"Checklist: {state}")
-        self.quality_summary_label.setText(
-            "Resume checklist: "
-            f"exportables={exportable}, author manquant={missing_author}, "
-            f"copyright manquant={missing_copyright}, "
-            f"validation={snapshot.get('validated_at_utc') or '-'}"
-        )
+        
+        # Add visual tags
+        self.quality_summary_layout.addWidget(_new_tag_label(f"{exportable} Photos", "#10B981"))
+        if missing_author > 0:
+            self.quality_summary_layout.addWidget(_new_tag_label(f"{missing_author} Auteur ?", "#EF4444"))
+        if missing_copyright > 0:
+            self.quality_summary_layout.addWidget(_new_tag_label(f"{missing_copyright} Copyright ?", "#EF4444"))
+        
+        val_date = snapshot.get('validated_at_utc')
+        if val_date:
+            self.quality_summary_layout.addWidget(_new_tag_label(f"Validé: {val_date[:10]}", "#3B82F6"))
+            
+        self.quality_summary_layout.addStretch()
 
     def _refresh_quality_banner(self) -> None:
         project_id = self._selected_project_id
@@ -4733,14 +4775,6 @@ class ExportTab(QWidget):
 
     def _on_min_rating_changed(self, _index: int = -1) -> None:
         self._refresh_quality_banner()
-
-    def _toggle_advanced_queue_controls(self, opened: bool) -> None:
-        self.queue_controls_panel.setVisible(bool(opened))
-        self.queue_controls_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
-
-    def _toggle_queue_section(self, opened: bool) -> None:
-        self.queue_section_widget.setVisible(bool(opened))
-        self.queue_section_toggle.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
 
     def _verify_quality_gate(self) -> None:
         project_id = self._selected_project_id
@@ -5233,15 +5267,29 @@ class ExportTab(QWidget):
             row.addWidget(badge)
             card_layout.addLayout(row)
 
-            details = QLabel(
-                f"Dest: {item.destination_dir}\n"
-                f"Profils: {', '.join(item.profiles)} | note>={item.min_rating}\n"
-                f"Options: zip={int(item.create_zip)} report={int(item.create_report)} "
-                f"planche={int(item.create_contact_sheet)}"
-            )
-            details.setObjectName("CardValue")
-            details.setWordWrap(True)
-            card_layout.addWidget(details)
+            dest_label = QLabel(f"Dossier: {item.destination_dir}")
+            dest_label.setObjectName("CardMuted")
+            dest_label.setWordWrap(True)
+            card_layout.addWidget(dest_label)
+
+            tags_row = QHBoxLayout()
+            tags_row.setSpacing(6)
+            
+            # Profiles Tags
+            profile_colors = {"web": "#10B981", "print": "#3B82F6", "social": "#F59E0B"}
+            for p in item.profiles:
+                tags_row.addWidget(_new_tag_label(p.upper(), profile_colors.get(p.lower(), "#6B7280")))
+            
+            # Rating Tag
+            tags_row.addWidget(_new_tag_label(f"Note >= {item.min_rating} ★", "#6366F1")) # Indigo
+            
+            # Options Tags
+            if item.create_zip: tags_row.addWidget(_new_tag_label("ZIP", "#EC4899")) # Pink
+            if item.create_report: tags_row.addWidget(_new_tag_label("RAPPORT", "#8B5CF6")) # Violet
+            if item.create_contact_sheet: tags_row.addWidget(_new_tag_label("CONTACT", "#F43F5E")) # Rose
+            
+            tags_row.addStretch(1)
+            card_layout.addLayout(tags_row)
 
             if item.message:
                 msg = QLabel(item.message)
@@ -5301,45 +5349,55 @@ class PresetTab(QWidget):
         form_layout.setContentsMargins(12, 10, 12, 12)
         form_layout.setSpacing(10)
 
-        header_box = QGroupBox("Preset")
-        header_box.setObjectName("PresetSectionBox")
-        header_layout = QVBoxLayout(header_box)
-        header_layout.setContentsMargins(16, 14, 16, 14)
-        header_layout.setSpacing(8)
-        name_label = QLabel("Nom")
-        name_label.setObjectName("EditFieldLabel")
+        header_box = BentoCard()
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(12, 8, 12, 8)
+        header_layout.setSpacing(16)
+        
+        name_section = QVBoxLayout()
+        name_section.setSpacing(2)
+        name_section.addWidget(QLabel("Nom du Preset"))
         self.name_edit = QLineEdit()
-        usage_hint = QLabel(
-            "Un preset est un modele reutilisable. Assigne-le ensuite a un projet depuis Hub Projets."
-        )
-        usage_hint.setWordWrap(True)
-        usage_hint.setObjectName("CardMuted")
-        assoc_label = QLabel("Associe a")
-        assoc_label.setObjectName("EditFieldLabel")
-        self.associated_projects_label = QLabel("Projets associes: -")
-        self.associated_projects_label.setWordWrap(True)
+        self.name_edit.setPlaceholderText("ex: Shooting Mariage Standard")
+        name_section.addWidget(self.name_edit)
+        
+        proj_section = QVBoxLayout()
+        proj_section.setSpacing(2)
+        proj_section.addWidget(QLabel("Projets associés"))
+        self.associated_projects_label = QLabel("-")
         self.associated_projects_label.setObjectName("CardValue")
-        header_layout.addWidget(name_label)
-        header_layout.addWidget(self.name_edit)
-        header_layout.addWidget(usage_hint)
-        header_layout.addWidget(assoc_label)
-        header_layout.addWidget(self.associated_projects_label)
+        proj_section.addWidget(self.associated_projects_label)
+        
+        header_layout.addLayout(name_section, 2)
+        header_layout.addLayout(proj_section, 3)
+        header_box.content_layout.addLayout(header_layout)
         form_layout.addWidget(header_box)
 
         action_bar = QFrame()
         action_bar.setObjectName("PresetActionBar")
+        action_bar.setStyleSheet("background: #1A1D21; border: 1px solid #333; border-radius: 10px; margin: 4px 0;")
         action_layout = QHBoxLayout(action_bar)
-        action_layout.setContentsMargins(10, 8, 10, 8)
-        action_layout.setSpacing(8)
+        action_layout.setContentsMargins(12, 6, 12, 6)
+        action_layout.setSpacing(12)
+        
         self.version_combo = QComboBox()
-        self.version_combo.setMinimumWidth(260)
-        rollback_btn = _new_button("Rollback")
+        self.version_combo.setMinimumWidth(220)
+        self.version_combo.setPlaceholderText("Versions précédentes...")
+        rollback_btn = _new_button("Restaurer")
         rollback_btn.clicked.connect(self._rollback)
+        
+        hist_label = QLabel("HISTORIQUE")
+        hist_label.setObjectName("PresetFieldLabel")
+        hist_label.setStyleSheet("margin-top: 4px; background: transparent;")
+        
+        action_layout.addWidget(hist_label)
         action_layout.addWidget(self.version_combo)
         action_layout.addWidget(rollback_btn)
-        self.expert_mode_check = QCheckBox("Mode expert JSON")
+        
+        self.expert_mode_check = QCheckBox("Mode JSON")
         self.expert_mode_check.toggled.connect(self._set_expert_mode)
         action_layout.addWidget(self.expert_mode_check)
+        
         action_layout.addStretch(1)
         new_btn = _new_button("Nouveau")
         new_btn.clicked.connect(self._reset_form)
@@ -5389,7 +5447,9 @@ class PresetTab(QWidget):
         sidebar_layout.setSpacing(8)
         self.preset_search_edit = QLineEdit()
         self.preset_search_edit.setObjectName("PresetSearch")
-        self.preset_search_edit.setPlaceholderText("Rechercher preset, projet, date...")
+        self.preset_search_edit.setPlaceholderText("Rechercher un preset...")
+        self.preset_search_edit.setMinimumHeight(36)
+        self.preset_search_edit.setStyleSheet("padding-left: 32px; background: #121212; border-radius: 12px;")
         self.preset_search_edit.textChanged.connect(self._on_preset_search_changed)
         sidebar_layout.addWidget(self.preset_search_edit)
 
@@ -5489,7 +5549,7 @@ class PresetTab(QWidget):
         select_btn = NativePushButton(preset.name)
         select_btn.setProperty("cardSelect", "true")
         select_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        select_btn.setMinimumHeight(30)
+        select_btn.setMinimumHeight(24)
         select_btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         select_btn.clicked.connect(
             lambda _checked=False, preset_id=preset.id: self._on_preset_card_selected(preset_id)
@@ -5500,6 +5560,30 @@ class PresetTab(QWidget):
         header.addWidget(select_btn, 1)
         header.addWidget(date_label)
         card_layout.addLayout(header)
+
+        # Config Summary Tags
+        try:
+            config = json.loads(preset.config_json)
+        except Exception:
+            config = {}
+        
+        tags_row = QHBoxLayout()
+        tags_row.setSpacing(4)
+        
+        profiles = config.get("export_profiles", {})
+        for p in ("web", "print", "social"):
+            if p in profiles:
+                color = {"web": "#10B981", "print": "#3B82F6", "social": "#F59E0B"}.get(p, "#6B7280")
+                tags_row.addWidget(_new_tag_label(p.upper(), color))
+        
+        if config.get("delivery", {}).get("create_zip"):
+            tags_row.addWidget(_new_tag_label("ZIP", "#EC4899"))
+        
+        if config.get("watermark", {}).get("enabled"):
+            tags_row.addWidget(_new_tag_label("WM", "#8B5CF6")) # Violet
+            
+        tags_row.addStretch()
+        card_layout.addLayout(tags_row)
 
         project_label = QLabel(self._linked_projects_summary(preset))
         project_label.setObjectName("CardMuted")
@@ -5546,7 +5630,7 @@ class PresetTab(QWidget):
     def _reset_form(self) -> None:
         self.current_preset_id = None
         self.name_edit.clear()
-        self.associated_projects_label.setText("Projets associes: -")
+        self.associated_projects_label.setText("-")
         self._apply_config_to_form(default_preset_config())
         self._sync_json_from_form()
         self.expert_mode_check.setChecked(False)
@@ -5645,208 +5729,249 @@ class PresetTab(QWidget):
         tab = QWidget()
         outer_layout = QVBoxLayout(tab)
         outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(8)
+        outer_layout.setSpacing(0)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setObjectName("BentoScroll")
+        
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(24)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(20)
 
-        naming_box = QGroupBox("Nommage")
-        naming_box.setObjectName("PresetSectionBox")
-        naming_layout = QVBoxLayout(naming_box)
-        naming_layout.setContentsMargins(16, 16, 16, 16)
-        naming_layout.setSpacing(8)
-        naming_label = QLabel("Pattern")
-        naming_label.setObjectName("EditFieldLabel")
+        # ── 1. Top Settings Area (2 Columns) ──
+        settings_layout = QHBoxLayout()
+        settings_layout.setSpacing(20)
+
+        # Left Column: Processing & Storage
+        processing_box = BentoCard("Structure & Importation")
+        proc_layout = QVBoxLayout()
+        proc_layout.setSpacing(16)
+
+        # Naming Group
+        naming_group = QVBoxLayout()
+        naming_lbl = QLabel("PATTERN DE NOMMAGE")
+        naming_lbl.setObjectName("PresetFieldLabel")
         self.naming_pattern_edit = QLineEdit()
         self.naming_pattern_edit.setPlaceholderText("{project}_{date}_{seq:04d}")
         self.naming_pattern_edit.setToolTip(
-            "Pattern de nom de fichier.\nVariables: {project}, {date}, {seq}."
+            "Tags disponibles :\n"
+            "  {project}  — Nom du projet\n"
+            "  {date}       — Date de shooting (YYYYMMDD)\n"
+            "  {seq:04d}  — Numéro séquentiel (ex: 0001)\n"
+            "  {orig}       — Nom original du fichier"
         )
-        naming_layout.addWidget(naming_label)
-        naming_layout.addWidget(self.naming_pattern_edit)
-        naming_layout.addStretch(1)
+        naming_group.addWidget(naming_lbl)
+        naming_group.addWidget(self.naming_pattern_edit)
+        naming_hint = QLabel("Tags : {project}  {date}  {seq:04d}  {orig}")
+        naming_hint.setStyleSheet("color: #777; font-size: 9px; font-family: Consolas, monospace; background: transparent;")
+        naming_group.addWidget(naming_hint)
+        proc_layout.addLayout(naming_group)
 
-        import_box = QGroupBox("Import")
-        import_box.setObjectName("PresetSectionBox")
-        import_layout = QVBoxLayout(import_box)
-        import_layout.setContentsMargins(16, 16, 16, 16)
-        import_layout.setSpacing(8)
-        self.import_verify_checksum_check = QCheckBox("Verifier checksum")
-        self.import_verify_checksum_check.setToolTip(
-            "Compare le hash source/destination pour garantir l'integrite des copies."
-        )
-        self.import_dual_backup_check = QCheckBox("Double sauvegarde")
-        self.import_dual_backup_check.setToolTip(
-            "Si active, une deuxieme copie est ecrite dans le dossier backup."
-        )
+        # Import/Backup Group
+        import_group = QVBoxLayout()
+        import_group.setSpacing(10)
+        import_lbl = QLabel("RÈGLES D'IMPORTATION")
+        import_lbl.setObjectName("PresetFieldLabel")
+        import_group.addWidget(import_lbl)
+        
+        self.import_verify_checksum_check = QCheckBox("Vérifier l'intégrité (Checksum)")
+        self.import_dual_backup_check = QCheckBox("Activer la double sauvegarde")
         self.import_dual_backup_check.toggled.connect(self._toggle_backup_path)
-
-        backup_row = QHBoxLayout()
+        
+        backup_container = QWidget()
+        backup_row = QHBoxLayout(backup_container)
+        backup_row.setContentsMargins(0, 0, 0, 0)
         self.import_backup_path_edit = QLineEdit()
-        self.import_backup_path_edit.setPlaceholderText("Chemin backup (optionnel)")
-        self.import_backup_path_edit.setToolTip(
-            "Dossier de destination pour la sauvegarde secondaire."
-        )
+        self.import_backup_path_edit.setPlaceholderText("Dossier de backup...")
         backup_btn = _new_button("Parcourir")
         backup_btn.clicked.connect(self._pick_backup_path)
         backup_row.addWidget(self.import_backup_path_edit)
         backup_row.addWidget(backup_btn)
         self.import_backup_browse_btn = backup_btn
+        
+        import_group.addWidget(self.import_verify_checksum_check)
+        import_group.addWidget(self.import_dual_backup_check)
+        import_group.addWidget(backup_container)
+        proc_layout.addLayout(import_group)
 
-        backup_label = QLabel("Backup path")
-        backup_label.setObjectName("EditFieldLabel")
-        import_layout.addWidget(self.import_verify_checksum_check)
-        import_layout.addWidget(self.import_dual_backup_check)
-        import_layout.addWidget(backup_label)
-        import_layout.addLayout(backup_row)
-        import_layout.addStretch(1)
+        processing_box.content_layout.addLayout(proc_layout)
+        settings_layout.addWidget(processing_box, 1)
 
-        watermark_box = QGroupBox("Watermark")
-        watermark_box.setObjectName("PresetSectionBox")
-        watermark_layout = QVBoxLayout(watermark_box)
-        watermark_layout.setContentsMargins(16, 16, 16, 16)
-        watermark_layout.setSpacing(8)
-        self.watermark_enabled_check = QCheckBox("Activer watermark")
-        self.watermark_enabled_check.setToolTip("Active le watermark (texte/logo) configure dans l'editeur visuel.")
+        # Right Column: Output Assets
+        output_box = BentoCard("Watermark & Livraison")
+        out_layout = QVBoxLayout()
+        out_layout.setSpacing(16)
+
+        # Watermark Section
+        wm_group = QVBoxLayout()
+        wm_lbl = QLabel("MARQUAGE VISUEL")
+        wm_lbl.setObjectName("PresetFieldLabel")
+        wm_group.addWidget(wm_lbl)
+        
+        wm_ctrl = QHBoxLayout()
+        self.watermark_enabled_check = QCheckBox("Appliquer le watermark")
         self.watermark_enabled_check.toggled.connect(self._on_watermark_enabled_toggled)
-        open_editor_btn = _new_button("Ouvrir l'editeur")
-        open_editor_btn.clicked.connect(self._open_watermark_editor)
-        self.watermark_summary_label = QLabel("Desactive")
-        self.watermark_summary_label.setObjectName("CardMuted")
-        self.watermark_summary_label.setWordWrap(True)
-        watermark_layout.addWidget(self.watermark_enabled_check)
-        watermark_layout.addWidget(open_editor_btn)
-        watermark_layout.addWidget(self.watermark_summary_label)
-        watermark_layout.addStretch(1)
+        wm_btn = _new_button("Ouvrir l'Éditeur")
+        wm_btn.clicked.connect(self._open_watermark_editor)
+        wm_ctrl.addWidget(self.watermark_enabled_check)
+        wm_ctrl.addStretch(1)
+        wm_ctrl.addWidget(wm_btn)
+        
+        self.watermark_tags_container = QWidget()
+        self.watermark_tags_layout = QHBoxLayout(self.watermark_tags_container)
+        self.watermark_tags_layout.setContentsMargins(0, 0, 0, 0)
+        self.watermark_tags_layout.setSpacing(6)
+        
+        wm_group.addLayout(wm_ctrl)
+        wm_group.addWidget(self.watermark_tags_container)
+        out_layout.addLayout(wm_group)
 
-        top_row = QHBoxLayout()
-        top_row.setContentsMargins(0, 0, 0, 0)
-        top_row.setSpacing(24)
-        top_row.addWidget(naming_box, 1)
-        top_row.addWidget(import_box, 1)
-        top_row.addWidget(watermark_box, 1)
-        layout.addLayout(top_row)
+        # Delivery Section
+        deliv_group = QVBoxLayout()
+        deliv_lbl = QLabel("FORMATS DE LIVRAISON")
+        deliv_lbl.setObjectName("PresetFieldLabel")
+        deliv_group.addWidget(deliv_lbl)
+        
+        deliv_checks = QHBoxLayout()
+        deliv_checks.setSpacing(20)
+        self.delivery_zip_check = QCheckBox("Archive ZIP")
+        self.delivery_report_check = QCheckBox("Rapport TXT")
+        self.delivery_contact_sheet_check = QCheckBox("Planche PDF")
+        deliv_checks.addWidget(self.delivery_zip_check)
+        deliv_checks.addWidget(self.delivery_report_check)
+        deliv_checks.addWidget(self.delivery_contact_sheet_check)
+        deliv_checks.addStretch(1)
+        
+        deliv_group.addLayout(deliv_checks)
+        out_layout.addLayout(deliv_group)
+        out_layout.addStretch(1)
 
-        export_box = QGroupBox("Export profils")
-        export_box.setObjectName("PresetSectionBox")
-        export_layout = QHBoxLayout(export_box)
-        export_layout.setContentsMargins(16, 16, 16, 16)
-        export_layout.setSpacing(16)
+        output_box.content_layout.addLayout(out_layout)
+        settings_layout.addWidget(output_box, 1)
+
+        layout.addLayout(settings_layout)
+
+        # ── 2. Export Profiles Accordion ──
+        export_section = QWidget()
+        export_v = QVBoxLayout(export_section)
+        export_v.setContentsMargins(0, 10, 0, 0)
+        
+        export_section_label = QLabel("PROFILS D'EXPORT AUTOMATISÉS")
+        export_section_label.setObjectName("SectionTitle")
+        export_v.addWidget(export_section_label)
+
+        self.accordion_layout = QVBoxLayout()
+        self.accordion_layout.setSpacing(8)
+        
         for profile in ("web", "print", "social"):
-            card = self._build_profile_card(profile)
-            export_layout.addWidget(card, 1)
-        layout.addWidget(export_box)
-
-        delivery_box = QGroupBox("Livraison")
-        delivery_box.setObjectName("PresetSectionBox")
-        delivery_layout = QVBoxLayout(delivery_box)
-        delivery_layout.setContentsMargins(16, 16, 16, 16)
-        delivery_layout.setSpacing(8)
-        self.delivery_zip_check = QCheckBox("ZIP livraison")
-        self.delivery_zip_check.setToolTip("Cree une archive ZIP prete a envoyer au client.")
-        self.delivery_report_check = QCheckBox("Rapport .txt")
-        self.delivery_report_check.setToolTip("Genere un rapport texte des exports.")
-        self.delivery_contact_sheet_check = QCheckBox("Planche contact PDF")
-        self.delivery_contact_sheet_check.setToolTip("Genere une planche contact PDF des images exportees.")
-        delivery_layout.addWidget(self.delivery_zip_check)
-        delivery_layout.addWidget(self.delivery_report_check)
-        delivery_layout.addWidget(self.delivery_contact_sheet_check)
-        delivery_layout.addStretch(1)
-        layout.addWidget(delivery_box)
+            item = self._build_profile_accordion(profile)
+            self.accordion_layout.addWidget(item)
+        
+        export_v.addLayout(self.accordion_layout)
+        layout.addWidget(export_section)
         layout.addStretch(1)
+
         scroll.setWidget(container)
         outer_layout.addWidget(scroll)
         self._refresh_watermark_summary()
         return tab
 
-    def _build_profile_card(self, profile: str) -> QGroupBox:
+    def _build_profile_accordion(self, profile: str) -> QWidget:
         profile_specs = {
-            "web": ("WEB", "Diffusion web"),
-            "print": ("PRINT", "Haute resolution"),
-            "social": ("SOCIAL", "Publication rapide"),
+            "web": ("WEB", "Diffusion web optimale", "#10B981"), # Emerald
+            "print": ("PRINT", "Haute résolution / Archivage", "#3B82F6"), # Blue
+            "social": ("SOCIAL", "Formats réseaux sociaux", "#F59E0B"), # Amber
         }
-        title_text, subtitle_text = profile_specs.get(profile, (profile.upper(), ""))
+        title_text, subtitle_text, color = profile_specs.get(profile, (profile.upper(), "", "#6B7280"))
 
-        box = QGroupBox("")
-        box.setObjectName("PresetProfileCard")
-        box.setProperty("profileType", profile)
-        box.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        box.setMinimumHeight(300)
-        card_layout = QVBoxLayout(box)
-        card_layout.setContentsMargins(0, 0, 0, 12)
-        card_layout.setSpacing(10)
+        container = QWidget()
+        v_layout = QVBoxLayout(container)
+        v_layout.setContentsMargins(0, 0, 0, 0)
+        v_layout.setSpacing(0)
 
-        header_frame = QFrame()
-        header_frame.setObjectName("PresetProfileHeader")
-        header_layout = QVBoxLayout(header_frame)
-        header_layout.setContentsMargins(12, 10, 12, 10)
-        header_layout.setSpacing(2)
-        header_title = QLabel(title_text)
-        header_title.setObjectName("PresetProfileTitle")
-        header_hint = QLabel(subtitle_text)
-        header_hint.setObjectName("PresetProfileHint")
-        header_layout.addWidget(header_title)
-        header_layout.addWidget(header_hint)
-        card_layout.addWidget(header_frame)
+        # Header
+        header = QFrame()
+        header.setObjectName("PresetAccordionHeader")
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        h_layout = QHBoxLayout(header)
+        h_layout.setContentsMargins(12, 10, 12, 10)
+        h_layout.setSpacing(12)
 
-        body = QWidget()
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(12, 0, 12, 0)
-        body_layout.setSpacing(8)
+        color_dot = QFrame()
+        color_dot.setFixedSize(10, 10)
+        color_dot.setStyleSheet(f"background: {color}; border-radius: 5px;")
+        
+        info = QVBoxLayout()
+        title_lbl = QLabel(title_text)
+        title_lbl.setObjectName("PresetAccordionTitle")
+        subtitle_lbl = QLabel(subtitle_text)
+        subtitle_lbl.setObjectName("PresetAccordionSubtitle")
+        info.addWidget(title_lbl)
+        info.addWidget(subtitle_lbl)
+        
+        toggle_btn = QToolButton()
+        toggle_btn.setArrowType(Qt.ArrowType.RightArrow)
+        toggle_btn.setStyleSheet("border: none; background: transparent;")
+        
+        h_layout.addWidget(color_dot)
+        h_layout.addLayout(info, 1)
+        h_layout.addWidget(toggle_btn)
 
-        format_label = QLabel("Format")
-        format_label.setObjectName("PresetProfileFieldLabel")
+        v_layout.addWidget(header)
+
+        # Body
+        body = QFrame()
+        body.setObjectName("PresetAccordionBody")
+        body.setVisible(False)
+        b_layout = QGridLayout(body)
+        b_layout.setContentsMargins(16, 12, 16, 12)
+        b_layout.setHorizontalSpacing(24)
+        b_layout.setVerticalSpacing(12)
+
         format_combo = QComboBox()
         format_combo.addItems(["JPEG", "PNG", "TIFF"])
-        format_combo.setToolTip("Format de sortie du profil.")
-
-        width_label = QLabel("Max px")
-        width_label.setObjectName("PresetProfileFieldLabel")
+        
         width_spin = QSpinBox()
         width_spin.setRange(320, 12000)
         width_spin.setSingleStep(160)
-        width_spin.setToolTip("Largeur maximale en pixels.")
-
-        quality_label = QLabel("Qualite")
-        quality_label.setObjectName("PresetProfileFieldLabel")
+        
         quality_slider = QSlider(Qt.Orientation.Horizontal)
         quality_slider.setRange(1, 100)
-        quality_slider.setSingleStep(1)
-        quality_slider.setToolTip("Qualite de compression (surtout JPEG).")
         quality_value = QLabel("85")
-        quality_value.setObjectName("EditFieldValue")
-        quality_value.setFixedWidth(44)
-        quality_slider.valueChanged.connect(lambda value, lbl=quality_value: lbl.setText(str(int(value))))
-        quality_row = QHBoxLayout()
-        quality_row.setContentsMargins(0, 0, 0, 0)
-        quality_row.setSpacing(8)
-        quality_row.addWidget(quality_slider, 1)
-        quality_row.addWidget(quality_value)
-
-        subdir_label = QLabel("Subdir")
-        subdir_label.setObjectName("PresetProfileFieldLabel")
+        quality_value.setFixedWidth(30)
+        quality_slider.valueChanged.connect(lambda v, l=quality_value: l.setText(str(v)))
+        q_row = QHBoxLayout()
+        q_row.addWidget(quality_slider, 1)
+        q_row.addWidget(quality_value)
+        
         subdir_edit = QLineEdit()
         subdir_edit.setPlaceholderText(profile)
-        subdir_edit.setToolTip("Sous-dossier de sortie pour ce profil.")
 
-        body_layout.addWidget(format_label)
-        body_layout.addWidget(format_combo)
-        body_layout.addWidget(width_label)
-        body_layout.addWidget(width_spin)
-        body_layout.addWidget(quality_label)
-        body_layout.addLayout(quality_row)
-        body_layout.addWidget(subdir_label)
-        body_layout.addWidget(subdir_edit)
-        body_layout.addStretch(1)
+        # Build grid
+        b_layout.addWidget(QLabel("Format de sortie"), 0, 0)
+        b_layout.addWidget(format_combo, 0, 1)
+        b_layout.addWidget(QLabel("Largeur max (px)"), 1, 0)
+        b_layout.addWidget(width_spin, 1, 1)
+        b_layout.addWidget(QLabel("Qualité compression"), 0, 2)
+        b_layout.addLayout(q_row, 0, 3)
+        b_layout.addWidget(QLabel("Sous-dossier"), 1, 2)
+        b_layout.addWidget(subdir_edit, 1, 3)
 
-        card_layout.addWidget(body, 1)
+        v_layout.addWidget(body)
+
+        def _on_toggle(event=None):
+            opened = not body.isVisible()
+            body.setVisible(opened)
+            toggle_btn.setArrowType(Qt.ArrowType.DownArrow if opened else Qt.ArrowType.RightArrow)
+            header.setProperty("opened", "true" if opened else "false")
+            header.style().unpolish(header)
+            header.style().polish(header)
+
+        header.mousePressEvent = _on_toggle
+        
         self.profile_widgets[profile] = {
             "format": format_combo,
             "max_width": width_spin,
@@ -5854,7 +5979,7 @@ class PresetTab(QWidget):
             "subdir": subdir_edit,
         }
         quality_slider.setValue(85)
-        return box
+        return container
 
     def _toggle_backup_path(self, enabled: bool) -> None:
         self.import_backup_path_edit.setEnabled(enabled)
@@ -5870,6 +5995,7 @@ class PresetTab(QWidget):
         dialog = WatermarkEditorDialog(
             config=current,
             app_data_dir=resolve_app_paths().data_dir,
+            accent_color=getattr(self.window(), "accent_color", "#10B981"),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -5881,7 +6007,24 @@ class PresetTab(QWidget):
     def _refresh_watermark_summary(self) -> None:
         self.watermark_cfg = normalize_watermark_config(self.watermark_cfg)
         self.watermark_cfg["enabled"] = bool(self.watermark_enabled_check.isChecked())
-        self.watermark_summary_label.setText(summarize_watermark_config(self.watermark_cfg))
+        
+        # Clear tags
+        while self.watermark_tags_layout.count():
+            item = self.watermark_tags_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
+        if not self.watermark_cfg["enabled"]:
+            self.watermark_tags_layout.addWidget(_new_tag_label("Désactivé", "#6B7280"))
+        else:
+            text_on = bool(self.watermark_cfg.get("text", {}).get("enabled"))
+            logo_on = bool(self.watermark_cfg.get("logo", {}).get("enabled"))
+            
+            if text_on: self.watermark_tags_layout.addWidget(_new_tag_label("TEXTE", "#3B82F6"))
+            if logo_on: self.watermark_tags_layout.addWidget(_new_tag_label("LOGO", "#10B981"))
+            if not text_on and not logo_on:
+                self.watermark_tags_layout.addWidget(_new_tag_label("Activé (vide)", "#F59E0B"))
+        
+        self.watermark_tags_layout.addStretch()
 
     def _pick_backup_path(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Choisir dossier backup")
@@ -6022,75 +6165,142 @@ class SettingsTab(QWidget):
         self.on_migration_completed = on_migration_completed
         self.on_theme_changed = on_theme_changed
 
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setObjectName("BentoScroll")
+        
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(24)
 
-        box = QGroupBox("Stockage global")
-        form = QFormLayout(box)
-
+        # ── 1. Storage Section ──
+        storage_card = BentoCard("Stockage Bibiliothèque")
+        st_layout = QVBoxLayout()
+        st_layout.setSpacing(16)
+        
+        st_info = QLabel("DÉFINITION DU RÉPERTOIRE GLOBAL")
+        st_info.setObjectName("PresetFieldLabel")
+        st_layout.addWidget(st_info)
+        
         row = QHBoxLayout()
         self.storage_root_edit = QLineEdit()
+        self.storage_root_edit.setPlaceholderText("ex: D:/Photos/PhotoHub_Library")
         browse_btn = _new_button("Parcourir")
         browse_btn.clicked.connect(self._pick_storage_root)
         row.addWidget(self.storage_root_edit)
         row.addWidget(browse_btn)
+        st_layout.addLayout(row)
 
-        self.apply_btn = _new_button("Appliquer", primary=True)
+        self.apply_btn = _new_button("Appliquer la migration", primary=True)
         self.apply_btn.clicked.connect(self._apply_storage_root)
+        
+        status_box = QHBoxLayout()
+        status_box.setSpacing(12)
+        self.status_label = QLabel("IDLE")
+        self.status_label.setObjectName("StatusBadge")
+        self.active_data_dir_label = QLabel("-")
+        self.active_data_dir_label.setObjectName("CardMuted")
+        status_box.addWidget(QLabel("Statut:"))
+        status_box.addWidget(self.status_label)
+        status_box.addStretch(1)
+        status_box.addWidget(self.active_data_dir_label)
+        
+        self.error_label = QLabel("-")
+        self.error_label.setObjectName("CardMuted")
+        self.error_label.setStyleSheet("color: #EF4444; background: transparent;") # Red error hint
+        self.error_label.setVisible(False)
 
-        self.status_label = QLabel("Statut migration: idle")
-        self.error_label = QLabel("Erreur: -")
-        self.active_data_dir_label = QLabel("Data active: -")
+        st_layout.addWidget(self.apply_btn)
+        st_layout.addLayout(status_box)
+        st_layout.addWidget(self.error_label)
+        
+        storage_card.content_layout.addLayout(st_layout)
+        layout.addWidget(storage_card)
 
-        form.addRow("Dossier global de stockage", row)
-        form.addRow("", self.apply_btn)
-        form.addRow("", self.status_label)
-        form.addRow("", self.error_label)
-        form.addRow("", self.active_data_dir_label)
+        # ── 2. Middle Row: Theme & Profile ──
+        mid_row = QHBoxLayout()
+        mid_row.setSpacing(24)
 
-        theme_box = QGroupBox("Theme")
-        theme_form = QFormLayout(theme_box)
-
+        # Theme
+        theme_card = BentoCard("Identité Visuelle")
+        theme_v = QVBoxLayout()
+        theme_v.setSpacing(16)
+        
+        th_lbl = QLabel("COULEUR D'ACCENTUATION")
+        th_lbl.setObjectName("PresetFieldLabel")
+        theme_v.addWidget(th_lbl)
+        
         accent_row = QHBoxLayout()
         self.accent_color_edit = QLineEdit()
         self.accent_color_edit.setPlaceholderText("#10B981")
         accent_pick_btn = _new_button("Choisir")
         accent_pick_btn.clicked.connect(self._pick_accent_color)
-        accent_row.addWidget(self.accent_color_edit)
+        accent_row.addWidget(self.accent_color_edit, 1)
         accent_row.addWidget(accent_pick_btn)
+        theme_v.addLayout(accent_row)
+        
+        banner_lbl = QLabel("BANNIÈRE TABLEAU DE BORD")
+        banner_lbl.setObjectName("PresetFieldLabel")
+        theme_v.addWidget(banner_lbl)
+        
+        banner_row = QHBoxLayout()
+        self.banner_path_edit = QLineEdit()
+        self.banner_path_edit.setPlaceholderText("Image panoramique (1200x200 conseillé)")
+        banner_pick_btn = _new_button("Parcourir")
+        banner_pick_btn.clicked.connect(self._pick_banner)
+        banner_row.addWidget(self.banner_path_edit, 1)
+        banner_row.addWidget(banner_pick_btn)
+        theme_v.addLayout(banner_row)
 
-        self.apply_theme_btn = _new_button("Appliquer accent", primary=True)
+        self.apply_theme_btn = _new_button("Mettre à jour le thème", primary=True)
         self.apply_theme_btn.clicked.connect(self._apply_accent_color)
-        self.theme_hint_label = QLabel("Couleur d'accent UI (hex): #RRGGBB")
-        self.theme_hint_label.setWordWrap(True)
+        theme_v.addWidget(self.apply_theme_btn)
+        
+        theme_card.content_layout.addLayout(theme_v)
+        mid_row.addWidget(theme_card, 1)
 
-        theme_form.addRow("Accent", accent_row)
-        theme_form.addRow("", self.apply_theme_btn)
-        theme_form.addRow("", self.theme_hint_label)
-
-        studio_box = QGroupBox("Profil studio")
-        studio_form = QFormLayout(studio_box)
-        self.studio_name_edit = QLineEdit()
-        self.photographer_name_edit = QLineEdit()
-        self.copyright_notice_edit = QLineEdit()
-        self.apply_studio_btn = _new_button("Appliquer profil studio", primary=True)
+        # Studio Profile
+        studio_card = BentoCard("Profil Studio")
+        studio_v = QVBoxLayout()
+        studio_v.setSpacing(12)
+        
+        self.studio_name_edit = QLineEdit(); self.studio_name_edit.setPlaceholderText("Nom du studio")
+        self.photographer_name_edit = QLineEdit(); self.photographer_name_edit.setPlaceholderText("Nom du photographe")
+        self.copyright_notice_edit = QLineEdit(); self.copyright_notice_edit.setPlaceholderText("Notice de copyright")
+        
+        studio_v.addWidget(self.studio_name_edit)
+        studio_v.addWidget(self.photographer_name_edit)
+        studio_v.addWidget(self.copyright_notice_edit)
+        
+        self.apply_studio_btn = _new_button("Sauvegarder le profil", primary=True)
         self.apply_studio_btn.clicked.connect(self._apply_studio_profile)
-        studio_form.addRow("Nom studio", self.studio_name_edit)
-        studio_form.addRow("Nom photographe", self.photographer_name_edit)
-        studio_form.addRow("Copyright", self.copyright_notice_edit)
-        studio_form.addRow("", self.apply_studio_btn)
-
-        layout.addWidget(box)
-        layout.addWidget(theme_box)
-        layout.addWidget(studio_box)
+        studio_v.addSpacing(4)
+        studio_v.addWidget(self.apply_studio_btn)
+        
+        studio_card.content_layout.addLayout(studio_v)
+        mid_row.addWidget(studio_card, 1)
+        
+        layout.addLayout(mid_row)
         layout.addStretch(1)
+        
+        scroll.setWidget(container)
+        main_layout.addWidget(scroll)
 
     def refresh_data(self) -> None:
         settings = self.storage_service.get_settings()
         self.storage_root_edit.setText(settings.get("storage_root", ""))
         self.accent_color_edit.setText(settings.get("accent_color", "#10B981"))
-        self.status_label.setText(f"Statut migration: {settings.get('last_migration_status', 'idle')}")
-        self.error_label.setText(f"Erreur: {settings.get('last_migration_error') or '-'}")
-        self.active_data_dir_label.setText(f"Data active: {settings.get('active_data_dir', '-')}")
+        self.status_label.setText(str(settings.get('last_migration_status', 'IDLE')).upper())
+        err = settings.get('last_migration_error')
+        self.error_label.setText(f"Erreur: {err}")
+        self.error_label.setVisible(bool(err))
+        self.active_data_dir_label.setText(f"Bibliothèque active: {settings.get('active_data_dir', '-')}")
+        self.banner_path_edit.setText(settings.get("dashboard_banner", ""))
         profile = settings.get("studio_profile", {}) if isinstance(settings, dict) else {}
         self.studio_name_edit.setText(str(profile.get("studio_name", "") or ""))
         self.photographer_name_edit.setText(str(profile.get("photographer_name", "") or ""))
@@ -6107,16 +6317,31 @@ class SettingsTab(QWidget):
         if chosen.isValid():
             self.accent_color_edit.setText(chosen.name().upper())
 
+
+    def _pick_banner(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Choisir une bannière", "", "Images (*.png *.jpg *.jpeg *.webp)"
+        )
+        if file_path:
+            self.banner_path_edit.setText(file_path)
+
     def _apply_accent_color(self) -> None:
+        # Accent Color
         requested = self.accent_color_edit.text().strip()
         normalized = normalize_accent_color(requested)
+        
+        # Banner Path
+        banner_path = self.banner_path_edit.text().strip() or None
+        
         try:
             self.storage_service.set_accent_color(normalized)
+            self.storage_service.set_dashboard_banner(banner_path)
+            
             self.accent_color_edit.setText(normalized)
-            self.on_theme_changed()
-            QMessageBox.information(self, "Theme", f"Accent applique: {normalized}")
+            self.on_theme_changed() # This usually refreshes UI
+            QMessageBox.information(self, "Identité", "Identité visuelle mise à jour.")
         except Exception as exc:
-            QMessageBox.critical(self, "Erreur theme", str(exc))
+            QMessageBox.critical(self, "Erreur", str(exc))
 
     def _apply_studio_profile(self) -> None:
         try:
