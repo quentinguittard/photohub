@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from datetime import date
 from pathlib import Path
@@ -20,6 +21,9 @@ from .quality_checks import (
     validate_quality_manually,
 )
 from ..utils import slugify
+
+
+logger = logging.getLogger(__name__)
 
 
 PROJECT_STATUSES: tuple[str, ...] = (
@@ -180,7 +184,7 @@ class ProjectService:
                 raise ValueError("Projet introuvable.")
             
             # Keep path for deletion after commit
-            root_path = Path(project.root_path).resolve()
+            root_path = Path(project.root_path).expanduser().resolve()
             
             # Delete DB entry (cascades should handle children if configured, 
             # but usually manual clean up is safer for critical data, here relying on cascading)
@@ -190,13 +194,18 @@ class ProjectService:
         # Files deletion
         if delete_files and root_path.exists() and root_path.is_dir():
             try:
+                projects_root = self.paths.projects_dir.expanduser().resolve()
+                if root_path == projects_root:
+                    raise ValueError("Refus de suppression: racine des projets.")
+                if root_path == Path(root_path.anchor):
+                    raise ValueError("Refus de suppression: racine disque.")
                 # Sanity check: ensure we are not deleting C:\ or similar
                 if len(root_path.parts) < 2:
                     raise ValueError("Chemin trop court, suppression annulee par securite.")
                 shutil.rmtree(root_path)
             except Exception as e:
-                # Log but don't fail the operation since DB is clean
-                print(f"Erreur suppression fichiers {root_path}: {e}")
+                # Log but don't fail the operation since DB is clean.
+                logger.exception("Echec suppression fichiers projet: %s", root_path)
 
     def update_project(
         self,

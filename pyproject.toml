@@ -17,6 +17,13 @@ dependencies = [
 fluent = [
   "PySide6-Fluent-Widgets>=1.8.6",
 ]
+dev = [
+  "mypy>=1.8",
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "ruff>=0.3.7",
+  "sqlalchemy[mypy]>=2.0",
+]
 
 [project.scripts]
 photohub = "photohub.main:main"
@@ -26,3 +33,25 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

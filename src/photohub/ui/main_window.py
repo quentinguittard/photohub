@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -97,6 +98,8 @@ QFLUENT_DISABLE_REASON = ""
 _QFLUENT_IMPORT_ATTEMPTED = False
 NativePushButton = QPushButton
 
+logger = logging.getLogger(__name__)
+
 
 def _lighter(color_hex: str, amount: int) -> str:
     color = QColor(color_hex)
@@ -159,7 +162,7 @@ def _disable_fluent(reason: str = "") -> None:
     _reset_fluent_state()
     QFLUENT_DISABLE_REASON = reason.strip()
     if QFLUENT_DISABLE_REASON:
-        print(f"[PhotoHub] Fluent widgets disabled: {QFLUENT_DISABLE_REASON}")
+        logger.warning("Fluent widgets disabled: %s", QFLUENT_DISABLE_REASON)
 
 
 def _detect_qt_binding(*widget_classes) -> str:

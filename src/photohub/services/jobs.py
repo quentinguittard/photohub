@@ -4,8 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import and_, func, or_, select
-from sqlalchemy import delete
+from sqlalchemy import and_, delete, func, or_, select, update
 
 from ..models import JobEvent, JobQueue
 
@@ -157,7 +156,7 @@ class JobQueueService:
     def claim_next(self, *, worker_id: str, allowed_job_types: tuple[str, ...] | None = None) -> JobSnapshot | None:
         now = datetime.utcnow()
         with self.session_factory() as session:
-            query = select(JobQueue).where(
+            query = select(JobQueue.id).where(
                 and_(
                     JobQueue.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_RETRY_WAITING]),
                     JobQueue.next_run_at <= now,
@@ -165,22 +164,27 @@ class JobQueueService:
             )
             if allowed_job_types:
                 query = query.where(JobQueue.job_type.in_([str(v).strip().lower() for v in allowed_job_types]))
-            model = session.scalar(query.order_by(JobQueue.priority.asc(), JobQueue.created_at.asc(), JobQueue.id.asc()))
-            if model is None:
+            candidate_id = session.scalar(
+                query.order_by(JobQueue.priority.asc(), JobQueue.created_at.asc(), JobQueue.id.asc()).limit(1)
+            )
+            if candidate_id is None:
                 return None
-            return self._claim_model(session, model, worker_id=str(worker_id), now=now)
+            return self._claim_by_id_atomic(
+                session,
+                job_id=int(candidate_id),
+                worker_id=str(worker_id),
+                now=now,
+            )
 
     def claim_job(self, *, job_id: int, worker_id: str) -> JobSnapshot | None:
         now = datetime.utcnow()
         with self.session_factory() as session:
-            model = session.get(JobQueue, int(job_id))
-            if model is None:
-                return None
-            if model.status not in {JOB_STATUS_QUEUED, JOB_STATUS_RETRY_WAITING}:
-                return None
-            if model.next_run_at > now:
-                return None
-            return self._claim_model(session, model, worker_id=str(worker_id), now=now)
+            return self._claim_by_id_atomic(
+                session,
+                job_id=int(job_id),
+                worker_id=str(worker_id),
+                now=now,
+            )
 
     def heartbeat(
         self,
@@ -368,6 +372,37 @@ class JobQueueService:
         model.heartbeat_at = now
         model.attempts = int(model.attempts) + 1
         model.updated_at = now
+        self._append_event(session, model.id, "info", f"Job claim par {worker_id} (try {model.attempts}).")
+        session.commit()
+        session.refresh(model)
+        return self._to_snapshot(model)
+
+    def _claim_by_id_atomic(self, session, *, job_id: int, worker_id: str, now: datetime) -> JobSnapshot | None:
+        result = session.execute(
+            update(JobQueue)
+            .where(
+                JobQueue.id == int(job_id),
+                JobQueue.status.in_([JOB_STATUS_QUEUED, JOB_STATUS_RETRY_WAITING]),
+                JobQueue.next_run_at <= now,
+            )
+            .values(
+                status=JOB_STATUS_RUNNING,
+                locked_by=str(worker_id),
+                locked_at=now,
+                heartbeat_at=now,
+                attempts=JobQueue.attempts + 1,
+                updated_at=now,
+            )
+        )
+        if result.rowcount == 0:
+            session.rollback()
+            return None
+
+        model = session.get(JobQueue, int(job_id))
+        if model is None:
+            session.rollback()
+            return None
+
         self._append_event(session, model.id, "info", f"Job claim par {worker_id} (try {model.attempts}).")
         session.commit()
         session.refresh(model)
