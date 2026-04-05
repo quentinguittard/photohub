@@ -1,3 +1,4 @@
+from .collections import CollectionService
 from .culling import CullingService
 from .edits import EditService
 from .exports import ExportService
@@ -12,6 +13,7 @@ from .renames import RenameService
 from .storage import StorageService
 
 __all__ = [
+    "CollectionService",
     "CullingService",
     "EditService",
     "ExportService",

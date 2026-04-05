@@ -3,15 +3,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
 
-from PySide6.QtCore import QDate, QEvent, QObject, QSize, QThread, QTimer, Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QKeySequence, QPixmap, QShortcut
+from PySide6.QtCore import QDate, QEasingCurve, QEvent, QObject, QParallelAnimationGroup, QPropertyAnimation, QRect, QSize, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QAction, QBrush, QColor, QIcon, QKeySequence, QLinearGradient, QPainter, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QComboBox,
@@ -27,6 +30,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -48,6 +52,7 @@ from PySide6.QtWidgets import (
 from ..config import compute_app_data_dir_from_root, normalize_accent_color, resolve_app_paths
 from ..preset_defaults import default_preset_config
 from ..services import (
+    CollectionService,
     CullingService,
     EditService,
     ExportService,
@@ -310,6 +315,50 @@ def _new_tag_label(text: str, color: str = "#10B981") -> QLabel:
     return label
 
 
+class _SpinnerWidget(QWidget):
+    """Rotating arc spinner drawn with QPainter, driven by QTimer.
+
+    Completely self-contained — call start()/stop() to control animation.
+    """
+
+    def __init__(self, parent=None, *, size: int = 48, color: QColor | None = None) -> None:
+        super().__init__(parent)
+        self._angle: int = 0
+        self._color = color or QColor(220, 220, 220)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)  # ~60 fps
+        self._timer.timeout.connect(self._tick)
+
+    def start(self) -> None:
+        self._timer.start()
+
+    def stop(self) -> None:
+        self._timer.stop()
+
+    def _tick(self) -> None:
+        self._angle = (self._angle + 8) % 360
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        m = 5
+        rect = QRect(m, m, self.width() - 2 * m, self.height() - 2 * m)
+        # Background track
+        pen_bg = QPen(QColor(80, 80, 80), 4)
+        pen_bg.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen_bg)
+        painter.drawArc(rect, 0, 360 * 16)
+        # Spinning arc (120°)
+        pen_fg = QPen(self._color, 4)
+        pen_fg.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen_fg)
+        painter.drawArc(rect, (90 - self._angle) * 16, -120 * 16)
+        painter.end()
+
+
 class JobWorker(QObject):
     progress = Signal(int, int, str)
     result = Signal(object)
@@ -345,6 +394,39 @@ class JobWorker(QObject):
         self.progress.emit(int(done), int(total), str(detail))
 
 
+class _AssetQueryThread(QThread):
+    """QThread subclass used exclusively for background asset-list queries.
+
+    Using QThread subclass (rather than moveToThread) is intentional:
+    QThread objects always retain the CREATING thread's affinity, even while
+    run() executes in a new OS thread.  This means Python GC can safely destroy
+    the wrapper from the main thread — avoiding the Qt warning:
+    "QObject::setParent: Cannot set parent, new parent is in a different thread"
+    that occurs when a moveToThread-ed worker's wrapper is GC-collected from the
+    main thread while its C++ object's affinity points to the background thread.
+    """
+
+    result: Signal = Signal(object)
+
+    def __init__(self, fn) -> None:
+        super().__init__()
+        self._fn = fn
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+
+    def run(self) -> None:
+        try:
+            value = self._fn(progress_cb=lambda *_a: None, is_cancelled=self.is_cancelled)
+            self.result.emit(value)
+        except Exception:
+            self.result.emit([])
+
+
 @dataclass
 class ExportQueueItem:
     queue_id: int
@@ -366,6 +448,78 @@ class ExportQueueItem:
 
 
 # DashboardTab moved to .dashboard.py
+
+
+class CropGridOverlay(QWidget):
+    """Transparent rule-of-thirds grid overlay drawn on top of the edit preview."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setVisible(False)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+        w = self.width()
+        h = self.height()
+
+        # Rule-of-thirds lines — semi-transparent white dashes
+        pen = QPen(QColor(255, 255, 255, 110))
+        pen.setWidth(1)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+
+        for x in (w // 3, 2 * w // 3):
+            painter.drawLine(x, 0, x, h)
+        for y in (h // 3, 2 * h // 3):
+            painter.drawLine(0, y, w, y)
+
+        # Diagonal guides (appear only during rotation)
+        if getattr(self, "_show_diagonals", False):
+            pen2 = QPen(QColor(255, 255, 255, 55))
+            pen2.setWidth(1)
+            pen2.setStyle(Qt.PenStyle.DotLine)
+            painter.setPen(pen2)
+            painter.drawLine(0, 0, w, h)
+            painter.drawLine(w, 0, 0, h)
+
+        painter.end()
+
+
+class CropPreviewLabel(QLabel):
+    """QLabel that emits drag deltas (in preview pixels) when the user pans the crop."""
+
+    crop_panned = Signal(int, int)  # dx, dy in preview pixels
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._crop_active = False
+        self._drag_start = None
+
+    def set_crop_active(self, active: bool) -> None:
+        self._crop_active = active
+        self.setCursor(Qt.CursorShape.OpenHandCursor if active else Qt.CursorShape.ArrowCursor)
+
+    def mousePressEvent(self, event) -> None:
+        if self._crop_active and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._crop_active and self._drag_start is not None:
+            delta = event.position().toPoint() - self._drag_start
+            self._drag_start = event.position().toPoint()
+            self.crop_panned.emit(delta.x(), delta.y())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._crop_active:
+            self._drag_start = None
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+        super().mouseReleaseEvent(event)
 
 
 class JobsTab(QWidget):
@@ -440,6 +594,7 @@ class MainWindow(QMainWindow):
         project_service: ProjectService,
         preset_service: PresetService,
         culling_service: CullingService,
+        collection_service: CollectionService,
         edit_service: EditService,
         metadata_service: MetadataService,
         import_service: ImportService,
@@ -453,6 +608,7 @@ class MainWindow(QMainWindow):
         self.project_service = project_service
         self.preset_service = preset_service
         self.culling_service = culling_service
+        self.collection_service = collection_service
         self.edit_service = edit_service
         self.import_service = import_service
         self.export_service = export_service
@@ -566,6 +722,7 @@ class MainWindow(QMainWindow):
         self.culling_tab = CullingTab(
             project_service=self.project_service,
             culling_service=self.culling_service,
+            collection_service=self.collection_service,
             on_data_changed=self.refresh_all,
             on_operation_started=self._on_operation_started,
             on_operation_ended=self._on_operation_ended,
@@ -575,6 +732,8 @@ class MainWindow(QMainWindow):
             project_service=self.project_service,
             edit_service=self.edit_service,
             metadata_service=self.metadata_service,
+            collection_service=self.collection_service,
+            culling_service=self.culling_service,
             on_operation_started=self._on_operation_started,
             on_operation_ended=self._on_operation_ended,
             on_job_event=self._append_job_event,
@@ -594,6 +753,7 @@ class MainWindow(QMainWindow):
             project_service=self.project_service,
             culling_service=self.culling_service,
             rename_service=self.rename_service,
+            collection_service=self.collection_service,
             on_data_changed=self.refresh_all,
             on_operation_started=self._on_operation_started,
             on_operation_ended=self._on_operation_ended,
@@ -621,6 +781,29 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self.stack, 1)
         root_layout.addWidget(content, 0, 1)
         self.setCentralWidget(root)
+
+        # Global project-loading overlay — floats above all tab pages.
+        self._global_busy_overlay = QFrame(self.stack)
+        self._global_busy_overlay.setObjectName("GlobalBusyOverlay")
+        self._global_busy_overlay.setStyleSheet(
+            "QFrame#GlobalBusyOverlay { background: rgba(0, 0, 0, 160); }"
+        )
+        _gbo_vbox = QVBoxLayout(self._global_busy_overlay)
+        _gbo_vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _gbo_vbox.setSpacing(14)
+        _gbo_lbl = QLabel("Chargement du projet…")
+        _gbo_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _gbo_lbl.setStyleSheet("color: #CCCCCC; font-size: 14px; background: transparent;")
+        self._global_busy_bar = AnimatedProgressBar()
+        self._global_busy_bar.setRange(0, 6)
+        self._global_busy_bar.setValue(0)
+        self._global_busy_bar.setFixedWidth(300)
+        self._global_busy_bar.setFixedHeight(8)
+        self._global_busy_bar.setTextVisible(False)
+        _gbo_vbox.addWidget(_gbo_lbl)
+        _gbo_vbox.addWidget(self._global_busy_bar, alignment=Qt.AlignmentFlag.AlignCenter)
+        self._global_busy_overlay.setGeometry(self.stack.rect())
+        self._global_busy_overlay.setVisible(False)
 
         self._apply_theme()
         self._apply_sidebar_state()
@@ -910,16 +1093,48 @@ class MainWindow(QMainWindow):
 
         self._on_project_context_changed()
 
+    def _show_global_busy(self) -> None:
+        self._global_busy_bar.setValue(0)
+        self._global_busy_overlay.setGeometry(self.stack.rect())
+        self._global_busy_overlay.raise_()
+        self._global_busy_overlay.setVisible(True)
+
+    def _hide_global_busy(self) -> None:
+        self._global_busy_overlay.setVisible(False)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._global_busy_overlay.isVisible():
+            self._global_busy_overlay.setGeometry(self.stack.rect())
+            self._global_busy_overlay.raise_()
+
     def _on_project_context_changed(self) -> None:
         project_id = self.project_context_combo.currentData()
         if project_id is None:
             return
-        self.import_tab.set_selected_project(int(project_id))
-        self.culling_tab.set_selected_project(int(project_id))
-        self.edit_tab.set_selected_project(int(project_id))
-        self.export_tab.set_selected_project(int(project_id))
-        self.hub_tab.select_project_by_id(int(project_id))
-        self.rename_tab.set_selected_project(int(project_id))
+        self._show_global_busy()
+        self._pending_context_project_id = project_id
+        QTimer.singleShot(0, self._do_project_context_change)
+
+    def _do_project_context_change(self) -> None:
+        project_id = getattr(self, "_pending_context_project_id", None)
+        try:
+            if project_id is None:
+                return
+            self.import_tab.set_selected_project(int(project_id))
+            self._global_busy_bar.setValue(1)
+            self.culling_tab.set_selected_project(int(project_id))
+            self._global_busy_bar.setValue(2)
+            self.edit_tab.set_selected_project(int(project_id))
+            self._global_busy_bar.setValue(3)
+            self.export_tab.set_selected_project(int(project_id))
+            self._global_busy_bar.setValue(4)
+            self.hub_tab.select_project_by_id(int(project_id))
+            self._global_busy_bar.setValue(5)
+            self.rename_tab.set_selected_project(int(project_id))
+            self._global_busy_bar.setValue(6)
+        finally:
+            self._hide_global_busy()
 
     def _on_search_text_changed(self, value: str) -> None:
         self.hub_tab.set_name_filter(value.strip())
@@ -1820,6 +2035,7 @@ class BatchRenameTab(QWidget):
         project_service: ProjectService,
         culling_service: CullingService,
         rename_service: RenameService,
+        collection_service: CollectionService,
         on_data_changed,
         on_operation_started,
         on_operation_ended,
@@ -1829,6 +2045,7 @@ class BatchRenameTab(QWidget):
         self.project_service = project_service
         self.culling_service = culling_service
         self.rename_service = rename_service
+        self.collection_service = collection_service
         self.on_data_changed = on_data_changed
         self.on_operation_started = on_operation_started
         self.on_operation_ended = on_operation_ended
@@ -1865,13 +2082,21 @@ class BatchRenameTab(QWidget):
         self.rejected_mode_combo.currentIndexChanged.connect(self._load_assets)
         filter_group.addWidget(self.rejected_mode_combo)
 
-        self.min_rating_combo = QComboBox()
-        for rating in range(0, 6):
-            self.min_rating_combo.addItem(str(rating), userData=rating)
-        self.min_rating_combo.setFixedWidth(50)
-        self.min_rating_combo.currentIndexChanged.connect(self._load_assets)
-        filter_group.addWidget(QLabel("★"))
-        filter_group.addWidget(self.min_rating_combo)
+        self._rename_min_rating: int = 0
+        self._rename_star_lbl = QLabel("≥")
+        self._rename_star_lbl.setStyleSheet("font-size: 11px; color: #888; padding: 0 2px;")
+        filter_group.addWidget(self._rename_star_lbl)
+        self._rename_star_btns: list[QToolButton] = []
+        for _i in range(1, 6):
+            _sb = QToolButton()
+            _sb.setFixedSize(24, 24)
+            _sb.setIcon(_star_icon(False))
+            _sb.setIconSize(QSize(16, 16))
+            _sb.setStyleSheet("QToolButton { border: none; background: transparent; padding: 0; }")
+            _sb.setCursor(Qt.CursorShape.PointingHandCursor)
+            _sb.clicked.connect(lambda _, n=_i: self._set_rename_rating_filter(n))
+            filter_group.addWidget(_sb)
+            self._rename_star_btns.append(_sb)
         
         controls_layout.addLayout(filter_group)
         controls_layout.addSpacing(10)
@@ -1882,16 +2107,18 @@ class BatchRenameTab(QWidget):
         self.pattern_edit.setPlaceholderText("{project}_{date}_{seq:04d}")
         self.pattern_edit.setToolTip(
             "Tags disponibles :\n"
-            "  {project}  — Nom du projet\n"
+            "  {project}    — Nom du projet\n"
+            "  {client}     — Nom du client (si défini)\n"
+            "  {preset}     — Nom du preset (si défini)\n"
             "  {date}       — Date de shooting (YYYYMMDD)\n"
-            "  {seq:04d}  — Numéro séquentiel (ex: 0001)\n"
+            "  {seq:04d}    — Numéro séquentiel (ex: 0001)\n"
             "  {orig}       — Nom original du fichier"
         )
         self.pattern_edit.textChanged.connect(self._refresh_preview)
         pattern_container = QVBoxLayout()
         pattern_container.setSpacing(2)
         pattern_container.addWidget(self.pattern_edit)
-        pattern_hint = QLabel("Tags : {project}  {date}  {seq:04d}  {orig}")
+        pattern_hint = QLabel("Tags : {project}  {client}  {preset}  {date}  {seq:04d}  {orig}")
         pattern_hint.setStyleSheet("color: #777; font-size: 9px; font-family: Consolas, monospace; background: transparent;")
         pattern_container.addWidget(pattern_hint)
         controls_layout.addLayout(pattern_container, 1)
@@ -1938,6 +2165,9 @@ class BatchRenameTab(QWidget):
         self.assets_area = QScrollArea()
         self.assets_area.setWidgetResizable(True)
         self.assets_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.assets_area.setProperty("minimalScroll", "true")
+        self.assets_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.assets_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.assets_content = QWidget()
         self.assets_layout = QVBoxLayout(self.assets_content)
         self.assets_layout.setContentsMargins(0, 4, 0, 4)
@@ -1977,7 +2207,7 @@ class BatchRenameTab(QWidget):
         progress_layout.setContentsMargins(10, 0, 10, 10)
         progress_layout.setSpacing(4)
         
-        self.progress_bar = QProgressBar()
+        self.progress_bar = AnimatedProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
@@ -1998,11 +2228,31 @@ class BatchRenameTab(QWidget):
         self.main_splitter = None
 
     def refresh_data(self) -> None:
-        pass # Combo removed.
+        self._refresh_collection_combo()
 
     def set_selected_project(self, project_id: int) -> None:
         self._selected_project_id = project_id
+        self._refresh_collection_combo()
         self._on_project_changed()
+
+    def _refresh_collection_combo(self) -> None:
+        prev = self.rejected_mode_combo.currentData()
+        self.rejected_mode_combo.blockSignals(True)
+        self.rejected_mode_combo.clear()
+        self.rejected_mode_combo.addItem("Tout", userData="all")
+        self.rejected_mode_combo.addItem("A garder", userData="kept")
+        self.rejected_mode_combo.addItem("Rejetees", userData="rejected")
+        if self._selected_project_id is not None:
+            try:
+                cols = self.collection_service.list_collections(project_id=self._selected_project_id)
+                for col, count in cols:
+                    self.rejected_mode_combo.addItem(f"{col.name} ({count})", userData=f"col:{col.id}")
+            except Exception:
+                pass
+        idx = self.rejected_mode_combo.findData(prev)
+        if idx >= 0:
+            self.rejected_mode_combo.setCurrentIndex(idx)
+        self.rejected_mode_combo.blockSignals(False)
 
     def _on_project_changed(self) -> None:
         self._sync_pattern_from_project()
@@ -2028,6 +2278,12 @@ class BatchRenameTab(QWidget):
             self.pattern_edit.setText(pattern)
         self._last_auto_pattern = pattern
 
+    def _set_rename_rating_filter(self, n: int) -> None:
+        self._rename_min_rating = 0 if self._rename_min_rating == n else n
+        for i, btn in enumerate(self._rename_star_btns, 1):
+            btn.setIcon(_star_icon(i <= self._rename_min_rating))
+        self._load_assets()
+
     def _load_assets(self) -> None:
         project_id = self._selected_project_id
         current_checked = set(self._selected_asset_ids())
@@ -2042,12 +2298,30 @@ class BatchRenameTab(QWidget):
             return
 
         self._loading_ui = True
+        filter_val = str(self.rejected_mode_combo.currentData() or "all")
+        col_filter_id: int | None = None
+        if filter_val.startswith("col:"):
+            try:
+                col_filter_id = int(filter_val.split(":", 1)[1])
+            except Exception:
+                pass
+            rejected_mode = "all"
+        else:
+            rejected_mode = filter_val
         try:
             assets = self.culling_service.list_assets(
                 int(project_id),
-                rejected_mode=str(self.rejected_mode_combo.currentData() or "all"),
-                min_rating=int(self.min_rating_combo.currentData() or 0),
+                rejected_mode=rejected_mode,
+                min_rating=self._rename_min_rating,
             )
+            if col_filter_id is not None:
+                try:
+                    col_ids = set(self.collection_service.get_asset_ids(
+                        collection_id=col_filter_id
+                    ))
+                    assets = [a for a in assets if int(a.id) in col_ids]
+                except Exception:
+                    pass
             if not assets:
                 empty = QLabel("Aucune photo avec ce filtre.")
                 empty.setObjectName("CardMuted")
@@ -2265,6 +2539,7 @@ class ImportExportTab(QWidget):
         project_service: ProjectService,
         preset_service: PresetService,
         culling_service: CullingService,
+        collection_service: CollectionService,
         edit_service: EditService,
         metadata_service: MetadataService,
         import_service: ImportService,
@@ -2287,6 +2562,7 @@ class ImportExportTab(QWidget):
         self.culling_tab = CullingTab(
             project_service=project_service,
             culling_service=culling_service,
+            collection_service=collection_service,
             on_data_changed=on_data_changed,
             on_operation_started=on_operation_started,
             on_operation_ended=on_operation_ended,
@@ -2296,6 +2572,8 @@ class ImportExportTab(QWidget):
             project_service=project_service,
             edit_service=edit_service,
             metadata_service=metadata_service,
+            collection_service=collection_service,
+            culling_service=culling_service,
             on_operation_started=on_operation_started,
             on_operation_ended=on_operation_ended,
             on_job_event=on_job_event,
@@ -2426,7 +2704,7 @@ class ImportTab(QWidget):
         progress_layout.setContentsMargins(10, 0, 10, 10)
         progress_layout.setSpacing(4)
         
-        self.progress_bar = QProgressBar()
+        self.progress_bar = AnimatedProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
@@ -2525,11 +2803,207 @@ class ImportTab(QWidget):
         self.on_job_event("[Import] Job termine.")
 
 
+_SVG_CROSS = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <line x1="4" y1="4" x2="20" y2="20" stroke="#EF4444" stroke-width="3" stroke-linecap="round"/>
+  <line x1="20" y1="4" x2="4" y2="20" stroke="#EF4444" stroke-width="3" stroke-linecap="round"/>
+</svg>"""
+
+_SVG_HEART = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path d="M12 20.5C6.5 15.5 2 11.8 2 7.5 2 4.4 4.4 2 7.5 2c1.7 0 3.4.9 4.5 2.3C13.1 2.9 14.8 2 16.5 2 19.6 2 22 4.4 22 7.5c0 4.3-4.5 8-10 13z" fill="#10B981"/>
+</svg>"""
+
+_SVG_MORE_VERT = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <circle cx="12" cy="5" r="2.2" fill="#AAAAAA"/>
+  <circle cx="12" cy="12" r="2.2" fill="#AAAAAA"/>
+  <circle cx="12" cy="19" r="2.2" fill="#AAAAAA"/>
+</svg>"""
+
+_SVG_CHEVRON_DOWN_GREEN = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <polyline points="6 9 12 15 18 9" fill="none" stroke="#6EF5C2" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>"""
+
+_SVG_STAR_TPL = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <path d="M12 2l2.939 5.953 6.572.955-4.756 4.635 1.123 6.544L12 17.25l-5.878 3.087 1.123-6.544L2.489 9.908l6.572-.955Z" fill="{color}" stroke="{stroke}" stroke-width="1.2" stroke-linejoin="round"/>
+</svg>"""
+
+
+def _star_icon(active: bool, size: int = 18) -> QIcon:
+    color = "#F59E0B" if active else "none"
+    stroke = "#F59E0B" if active else "#666"
+    return _make_svg_icon(_SVG_STAR_TPL.format(color=color, stroke=stroke), size)
+
+
+def _make_svg_icon(svg: str, size: int = 24) -> QIcon:
+    try:
+        from PySide6.QtSvg import QSvgRenderer
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        renderer = QSvgRenderer(bytearray(svg.encode()))
+        painter = QPainter(pixmap)
+        renderer.render(painter)
+        painter.end()
+        return QIcon(pixmap)
+    except Exception:
+        return QIcon()
+
+
+class AnimatedProgressBar(QProgressBar):
+    """QProgressBar with a moving shimmer animation and automatic WaitCursor."""
+
+    _active_count: int = 0  # class-level ref-count for cursor management
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._shimmer = 0.0
+        self._cursor_held = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._tick)
+
+    # ------------------------------------------------------------------
+    def _is_running(self) -> bool:
+        return self.maximum() == 0 or (0 < self.value() < self.maximum())
+
+    def setValue(self, value: int) -> None:
+        super().setValue(value)
+        self._sync_animation()
+
+    def setMaximum(self, value: int) -> None:
+        super().setMaximum(value)
+        self._sync_animation()
+
+    def setRange(self, min_: int, max_: int) -> None:
+        super().setRange(min_, max_)
+        self._sync_animation()
+
+    def _sync_animation(self) -> None:
+        running = self._is_running()
+        if running and not self._timer.isActive():
+            self._timer.start()
+            if not self._cursor_held:
+                AnimatedProgressBar._active_count += 1
+                if AnimatedProgressBar._active_count == 1:
+                    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+                self._cursor_held = True
+        elif not running and self._timer.isActive():
+            self._timer.stop()
+            self.update()
+            if self._cursor_held:
+                AnimatedProgressBar._active_count -= 1
+                if AnimatedProgressBar._active_count <= 0:
+                    AnimatedProgressBar._active_count = 0
+                    QApplication.restoreOverrideCursor()
+                self._cursor_held = False
+
+    def _tick(self) -> None:
+        self._shimmer = (self._shimmer + 0.018) % 1.0
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        if not self._is_running():
+            return
+        w, h = self.width(), self.height()
+        if self.maximum() > 0:
+            chunk_w = max(1, int(w * self.value() / self.maximum()))
+        else:
+            chunk_w = w
+        shimmer_w = max(40, w // 3)
+        x = int(self._shimmer * (chunk_w + shimmer_w)) - shimmer_w
+        grad = QLinearGradient(float(x), 0.0, float(x + shimmer_w), 0.0)
+        grad.setColorAt(0.0, QColor(255, 255, 255, 0))
+        grad.setColorAt(0.5, QColor(255, 255, 255, 55))
+        grad.setColorAt(1.0, QColor(255, 255, 255, 0))
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(grad))
+        painter.setClipRect(0, 0, chunk_w, h)
+        painter.drawRoundedRect(0, 0, chunk_w, h, 6, 6)
+        painter.end()
+
+
+class SlidePreviewWidget(QWidget):
+    """Drop-in QLabel replacement with left/right slide transition."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._active  = QLabel(self)
+        self._standby = QLabel(self)
+        for lbl in (self._active, self._standby):
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lbl.setScaledContents(False)
+        self._standby.hide()
+        self._animating = False
+
+    def setPixmap(self, pixmap: QPixmap) -> None:
+        self._active.setPixmap(pixmap)
+        self._active.setText("")
+
+    def setText(self, text: str) -> None:
+        self._active.setText(text)
+        self._active.setPixmap(QPixmap())
+
+    def setAlignment(self, alignment) -> None:
+        for lbl in (self._active, self._standby):
+            lbl.setAlignment(alignment)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if not self._animating:
+            self._active.setGeometry(self.rect())
+        self._standby.setGeometry(self.rect())
+
+    def slide(self, direction: str, pixmap: QPixmap) -> None:
+        if self._animating:
+            self._active.setGeometry(self.rect())
+            self._standby.hide()
+            self._animating = False
+
+        w, h = self.width(), self.height()
+        exit_x  = -w if direction == "left"  else  w
+        enter_x =  w if direction == "left"  else -w
+
+        self._standby.setPixmap(pixmap)
+        self._standby.setText("")
+        self._standby.setGeometry(QRect(enter_x, 0, w, h))
+        self._standby.show()
+        self._standby.raise_()
+
+        anim_out = QPropertyAnimation(self._active, b"geometry", self)
+        anim_out.setDuration(230)
+        anim_out.setStartValue(QRect(0, 0, w, h))
+        anim_out.setEndValue(QRect(exit_x, 0, w, h))
+        anim_out.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        anim_in = QPropertyAnimation(self._standby, b"geometry", self)
+        anim_in.setDuration(230)
+        anim_in.setStartValue(QRect(enter_x, 0, w, h))
+        anim_in.setEndValue(QRect(0, 0, w, h))
+        anim_in.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        self._group = QParallelAnimationGroup(self)
+        self._group.addAnimation(anim_out)
+        self._group.addAnimation(anim_in)
+        self._group.finished.connect(self._on_slide_done)
+        self._animating = True
+        self._group.start()
+
+    def _on_slide_done(self) -> None:
+        self._active.hide()
+        self._active, self._standby = self._standby, self._active
+        self._active.setGeometry(self.rect())
+        self._active.show()
+        self._standby.hide()
+        self._animating = False
+
+
 class CullingTab(QWidget):
     def __init__(
         self,
         project_service: ProjectService,
         culling_service: CullingService,
+        collection_service: CollectionService,
         on_data_changed,
         on_operation_started,
         on_operation_ended,
@@ -2538,6 +3012,7 @@ class CullingTab(QWidget):
         super().__init__()
         self.project_service = project_service
         self.culling_service = culling_service
+        self.collection_service = collection_service
         self.on_data_changed = on_data_changed
         self.on_operation_started = on_operation_started
         self.on_operation_ended = on_operation_ended
@@ -2545,16 +3020,13 @@ class CullingTab(QWidget):
         self._shortcut_refs: list[QShortcut] = []
         self._job_thread: QThread | None = None
         self._job_worker: JobWorker | None = None
-        self.focus_mode_enabled = False
         self.asset_card_widgets: dict[int, QFrame] = {}
         self.show_path_overlay = False
         self._preview_hovered = False
         self.filmstrip_buttons: dict[int, QToolButton] = {}
         self._filmstrip_window: tuple[int, int] = (0, -1)
-        self._preview_cache: dict[str, QPixmap] = {}
-        self._preview_cache_order: list[str] = []
-        self._thumb_cache: dict[str, QPixmap] = {}
-        self._thumb_cache_order: list[str] = []
+        self._preview_cache: OrderedDict[str, QPixmap] = OrderedDict()
+        self._thumb_cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._prefetch_manager: PreviewPrefetchManager | None = None
         try:
             cache_root = Path(self.project_service.paths.data_dir) / "cache" / "images"
@@ -2564,6 +3036,24 @@ class CullingTab(QWidget):
         self._hud_timer = QTimer(self)
         self._hud_timer.setSingleShot(True)
         self._hud_timer.timeout.connect(self._hide_hud)
+        # Timer that fills filmstrip placeholders once background thumb generation completes.
+        self._thumb_fill_timer = QTimer(self)
+        self._thumb_fill_timer.setInterval(200)
+        self._thumb_fill_timer.timeout.connect(self._fill_pending_filmstrip_thumbs)
+        self._pending_thumb_ids: set[int] = set()
+        # Retry counter per asset_id: after _THUMB_FALLBACK_TICKS failed polls
+        # the timer falls back to a direct QPixmap load (handles cases where
+        # DiskImageCache/PIL cannot process the file format).
+        self._thumb_retry_count: dict[int, int] = {}
+        _THUMB_FALLBACK_TICKS = 10  # 10 × 200ms = 2 s before fallback
+        self._pending_slide_direction: str | None = None
+        self._active_collection_id: int | None = None
+        self._collection_asset_ids: set[int] = set()
+        # Tracks which button was previously styled as selected so we can
+        # update only the two changed buttons (O(1)) on each navigation event.
+        self._prev_selected_filmstrip_id: int | None = None
+        # Background thread for asset list queries (keeps UI thread unblocked).
+        self._asset_loader_thread: "_AssetQueryThread | None" = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2575,7 +3065,7 @@ class CullingTab(QWidget):
         controls_card = BentoCard("Configuration du tri")
         self.controls_box = controls_card
         controls_layout = QHBoxLayout()
-        controls_layout.setContentsMargins(12, 8, 12, 8)
+        controls_layout.setContentsMargins(8, 4, 8, 4)
         controls_layout.setSpacing(16)
 
         # Filters
@@ -2586,39 +3076,97 @@ class CullingTab(QWidget):
         self.rejected_mode_combo.addItem("Tout", userData="all")
         self.rejected_mode_combo.addItem("A garder", userData="kept")
         self.rejected_mode_combo.addItem("Rejetees", userData="rejected")
-        self.rejected_mode_combo.setFixedWidth(100)
+        self.rejected_mode_combo.setFixedWidth(130)
         self.rejected_mode_combo.currentIndexChanged.connect(self._load_assets)
         filter_group.addWidget(self.rejected_mode_combo)
 
-        self.min_rating_filter_combo = QComboBox()
-        for rating in range(0, 6):
-            self.min_rating_filter_combo.addItem(str(rating), userData=rating)
-        self.min_rating_filter_combo.setFixedWidth(50)
-        self.min_rating_filter_combo.currentIndexChanged.connect(self._load_assets)
-        filter_group.addWidget(QLabel("★"))
-        filter_group.addWidget(self.min_rating_filter_combo)
-        
-        controls_layout.addLayout(filter_group)
-        
-        # View Actions
-        self.focus_mode_btn = _new_button("Focus Mode (F)")
-        self.focus_mode_btn.setCheckable(True)
-        self.focus_mode_btn.toggled.connect(self._set_focus_mode)
+        self._cull_min_rating: int = 0
+        _cull_star_lbl = QLabel("≥")
+        _cull_star_lbl.setStyleSheet("font-size: 11px; color: #888; padding: 0 2px;")
+        filter_group.addWidget(_cull_star_lbl)
+        self._cull_star_btns: list[QToolButton] = []
+        for _i in range(1, 6):
+            _sb = QToolButton()
+            _sb.setFixedSize(24, 24)
+            _sb.setIcon(_star_icon(False))
+            _sb.setIconSize(QSize(16, 16))
+            _sb.setStyleSheet("QToolButton { border: none; background: transparent; padding: 0; }")
+            _sb.setCursor(Qt.CursorShape.PointingHandCursor)
+            _sb.clicked.connect(lambda _, n=_i: self._set_cull_rating_filter(n))
+            filter_group.addWidget(_sb)
+            self._cull_star_btns.append(_sb)
 
+        controls_layout.addLayout(filter_group)
+
+        # View Actions
         self.overlay_toggle_btn = QCheckBox("Infos Chemin (I)")
         self.overlay_toggle_btn.toggled.connect(self._toggle_overlay_details)
 
-        controls_layout.addWidget(self.focus_mode_btn)
         controls_layout.addWidget(self.overlay_toggle_btn)
-        
-        controls_layout.addStretch(1)
-        
+
         self.auto_advance_check = QCheckBox("Auto suivant")
         self.auto_advance_check.setChecked(True)
         controls_layout.addWidget(self.auto_advance_check)
 
         controls_card.content_layout.addLayout(controls_layout)
-        layout.addWidget(controls_card)
+
+        # ── Collections Card ──
+        collections_card = BentoCard("Collections")
+        collections_layout = QHBoxLayout()
+        collections_layout.setContentsMargins(8, 4, 8, 4)
+        collections_layout.setSpacing(8)
+
+        collections_layout.addWidget(QLabel("Collection :"))
+        self.collection_combo = QComboBox()
+        self.collection_combo.addItem("— Aucune —", userData=None)
+        self.collection_combo.setMinimumWidth(160)
+        self.collection_combo.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.collection_combo.setToolTip("Sélectionner une collection à gérer")
+        self.collection_combo.currentIndexChanged.connect(self._on_collection_changed)
+        collections_layout.addWidget(self.collection_combo)
+        self.collection_menu_btn = QToolButton()
+        self.collection_menu_btn.setIcon(_make_svg_icon(_SVG_MORE_VERT, 20))
+        self.collection_menu_btn.setIconSize(QSize(20, 20))
+        self.collection_menu_btn.setFixedSize(32, 32)
+        self.collection_menu_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.collection_menu_btn.setToolTip("Gérer les collections")
+        self._col_menu = QMenu(self.collection_menu_btn)
+        self._act_new = QAction("Nouvelle collection", self.collection_menu_btn)
+        self._act_new.triggered.connect(self._create_collection)
+        self._act_rename = QAction("Renommer la collection", self.collection_menu_btn)
+        self._act_rename.triggered.connect(self._rename_active_collection)
+        self._act_del = QAction("Supprimer la collection", self.collection_menu_btn)
+        self._act_del.triggered.connect(self._delete_active_collection)
+        self._col_menu.addAction(self._act_new)
+        self._col_menu.addSeparator()
+        self._col_menu.addAction(self._act_rename)
+        self._col_menu.addAction(self._act_del)
+        self.collection_menu_btn.setMenu(self._col_menu)
+        collections_layout.addWidget(self.collection_menu_btn)
+
+        self.collection_overlay_btn = QToolButton()
+        self.collection_overlay_btn.setObjectName("CollectionOverlayBtn")
+        self.collection_overlay_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.collection_overlay_btn.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self.collection_overlay_btn.setText("Ajouter à la collection")
+        self.collection_overlay_btn.setAutoRaise(True)
+        self.collection_overlay_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.collection_overlay_btn.setStyleSheet(
+            "QToolButton#CollectionOverlayBtn { color: #94a3b8; font-size: 13px;"
+            " border: none; background: transparent; padding: 2px 4px; }"
+            "QToolButton#CollectionOverlayBtn:hover { color: #cbd5e1; }"
+        )
+        self.collection_overlay_btn.clicked.connect(self._toggle_collection_membership)
+        collections_layout.addWidget(self.collection_overlay_btn)
+        collections_layout.addStretch(1)
+
+        collections_card.content_layout.addLayout(collections_layout)
+
+        top_bar_layout = QHBoxLayout()
+        top_bar_layout.setSpacing(10)
+        top_bar_layout.addWidget(controls_card)
+        top_bar_layout.addWidget(collections_card)
+        layout.addLayout(top_bar_layout)
 
         # Legacy stubs for compatibility
         self.keyword_filter_edit = QLineEdit()
@@ -2663,17 +3211,22 @@ class CullingTab(QWidget):
         self.side_panel = side_panel
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(0, 0, 0, 0)
-        side_layout.setSpacing(10)
+        side_layout.setSpacing(4)
         
-        preview_card = BentoCard() # No title for clean look
+        preview_frame = QFrame()
+        preview_frame.setObjectName("PreviewFrame")
+        _pf_layout = QVBoxLayout(preview_frame)
+        _pf_layout.setContentsMargins(4, 4, 4, 4)
+        _pf_layout.setSpacing(0)
         preview_grid = QGridLayout()
         preview_grid.setContentsMargins(0, 0, 0, 0)
         
-        self.preview_label = QLabel("Aperçu")
+        self.preview_label = SlidePreviewWidget()
         self.preview_label.setObjectName("PreviewLabel")
         self.preview_label.setMinimumHeight(280)
         self.preview_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setText("Aperçu")
         
         self.hud_label = QLabel("")
         self.hud_label.setObjectName("CullingHud")
@@ -2708,28 +3261,36 @@ class CullingTab(QWidget):
         preview_grid.addWidget(self.info_overlay_label, 0, 0, alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft)
         preview_grid.addWidget(self.path_overlay_label, 0, 0, alignment=Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         
-        preview_card.content_layout.addLayout(preview_grid)
-        self.preview_frame = preview_card
-        side_layout.addWidget(preview_card, 1)
+        _pf_layout.addLayout(preview_grid)
+        self.preview_frame = preview_frame
+        side_layout.addWidget(preview_frame, 1)
         
         self.preview_label.installEventFilter(self)
         self.preview_frame.installEventFilter(self)
 
-        # ── 3. Tinder-style Decision Bar ──
-        decision_card = BentoCard() # Clean container
-        decision_card.setMinimumHeight(80)
-        decision_layout = QHBoxLayout()
-        decision_layout.setContentsMargins(20, 10, 20, 10)
-        decision_layout.setSpacing(15)
+        # ── 3. Action Bar (decision + collection, single compact toolbar) ──
+        action_bar = QFrame()
+        action_bar.setObjectName("ActionBar")
+        action_bar.setFixedHeight(64)
+        action_layout = QHBoxLayout(action_bar)
+        action_layout.setContentsMargins(8, 8, 8, 8)
+        action_layout.setSpacing(0)
 
-        # REJECT Button (Tinder Red)
-        self.tinder_reject_btn = QPushButton("✘ REJETER")
+        # REJECT Button
+        self.tinder_reject_btn = QToolButton()
         self.tinder_reject_btn.setObjectName("TinderRejectBtn")
         self.tinder_reject_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.tinder_reject_btn.setMinimumHeight(44)
+        self.tinder_reject_btn.setFixedSize(48, 48)
+        self.tinder_reject_btn.setIcon(_make_svg_icon(_SVG_CROSS, 32))
+        self.tinder_reject_btn.setIconSize(QSize(32, 32))
+        self.tinder_reject_btn.setStyleSheet(
+            "QToolButton#TinderRejectBtn { border-radius:24px; border:none; background:transparent; }"
+            "QToolButton#TinderRejectBtn:hover { background: rgba(239,68,68,0.12); }"
+            "QToolButton#TinderRejectBtn:pressed { background: rgba(239,68,68,0.25); }"
+        )
         self.tinder_reject_btn.clicked.connect(self._mark_selected_reject)
-        
-        # Rating Stars (Tinder Style Between Buttons)
+
+        # Rating Stars
         star_layout = QHBoxLayout()
         star_layout.setSpacing(4)
         self.star_btns = []
@@ -2740,30 +3301,39 @@ class CullingTab(QWidget):
             btn.setCheckable(True)
             btn.setFixedSize(32, 32)
             btn.clicked.connect(lambda _, r=i: self._set_selected_rating(r))
+            btn.installEventFilter(self)
             star_layout.addWidget(btn)
             self.star_btns.append(btn)
-        
-        # KEEP Button (Tinder Green)
-        self.tinder_keep_btn = QPushButton("✔ GARDER")
+
+        # KEEP Button
+        self.tinder_keep_btn = QToolButton()
         self.tinder_keep_btn.setObjectName("TinderKeepBtn")
         self.tinder_keep_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.tinder_keep_btn.setMinimumHeight(44)
+        self.tinder_keep_btn.setFixedSize(48, 48)
+        self.tinder_keep_btn.setIcon(_make_svg_icon(_SVG_HEART, 32))
+        self.tinder_keep_btn.setIconSize(QSize(32, 32))
+        self.tinder_keep_btn.setStyleSheet(
+            "QToolButton#TinderKeepBtn { border-radius:24px; border:none; background:transparent; }"
+            "QToolButton#TinderKeepBtn:hover { background: rgba(16,185,129,0.12); }"
+            "QToolButton#TinderKeepBtn:pressed { background: rgba(16,185,129,0.25); }"
+        )
         self.tinder_keep_btn.clicked.connect(self._mark_selected_keep)
 
-        # Build Bar
-        decision_layout.addWidget(self.tinder_reject_btn, 1)
-        decision_layout.addStretch(1)
-        decision_layout.addLayout(star_layout)
-        decision_layout.addStretch(1)
-        decision_layout.addWidget(self.tinder_keep_btn, 1)
-        
-        decision_card.content_layout.addLayout(decision_layout)
-        side_layout.addWidget(decision_card)
+        # Decision section
+        action_layout.addStretch(1)
+        action_layout.addWidget(self.tinder_reject_btn)
+        action_layout.addSpacing(12)
+        action_layout.addLayout(star_layout)
+        action_layout.addSpacing(12)
+        action_layout.addWidget(self.tinder_keep_btn)
+        action_layout.addStretch(1)
+
+        side_layout.addWidget(action_bar)
 
         # Filmstrip
         self.filmstrip_frame = QFrame()
         self.filmstrip_frame.setObjectName("FilmstripFrame")
-        self.filmstrip_frame.setFixedHeight(140)
+        self.filmstrip_frame.setFixedHeight(110)
         film_layout = QVBoxLayout(self.filmstrip_frame)
         film_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -2787,20 +3357,49 @@ class CullingTab(QWidget):
         self.asset_sequence_label = QLabel()
         self.actions_box_anim = None
         self.actions_box = QWidget() # Stub
-        self.batch_progress = QProgressBar() # Stub
+        self.batch_progress = AnimatedProgressBar() # Stub
         self.job_status_label = QLabel() # Stub
         self.batch_cancel_btn = QWidget() # Stub
+
+        # ── Loading overlay ──
+        # Floats above the layout; positioned by resizeEvent.
+        # NOTE: Qt stylesheets use integer alpha (0-255), NOT float (0.0-1.0).
+        self._busy_overlay = QFrame(self)
+        self._busy_overlay.setObjectName("BusyOverlay")
+        self._busy_overlay.setStyleSheet(
+            "QFrame#BusyOverlay { background: rgba(0, 0, 0, 160); border-radius: 0px; }"
+        )
+        _ov_vbox = QVBoxLayout(self._busy_overlay)
+        _ov_vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _ov_vbox.setSpacing(16)
+        self._busy_spinner = _SpinnerWidget(size=48, color=QColor(220, 220, 220))
+        _ov_lbl = QLabel("Chargement des photos…")
+        _ov_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _ov_lbl.setStyleSheet("color: #CCCCCC; font-size: 13px; background: transparent;")
+        _ov_vbox.addWidget(self._busy_spinner, alignment=Qt.AlignmentFlag.AlignHCenter)
+        _ov_vbox.addWidget(_ov_lbl)
+        self._busy_overlay.setGeometry(self.rect())
+        self._busy_overlay.setVisible(False)
 
         self._build_shortcuts()
 
     def eventFilter(self, obj, event) -> bool:
+        if obj in self.star_btns:
+            if event.type() == QEvent.Type.Enter:
+                self._on_star_hover(self.star_btns.index(obj))
+                return False
+            if event.type() == QEvent.Type.Leave:
+                self._on_star_leave()
+                return False
         if obj in {self.preview_frame, self.preview_label}:
             if event.type() == QEvent.Type.Enter:
                 self._preview_hovered = True
                 self._update_overlay_visibility()
+                self._update_collection_overlay()
             elif event.type() == QEvent.Type.Leave:
                 self._preview_hovered = False
                 self._update_overlay_visibility()
+                self._update_collection_overlay()
             elif event.type() == QEvent.Type.Wheel:
                 delta = int(event.angleDelta().y())
                 if delta < 0:
@@ -2836,24 +3435,91 @@ class CullingTab(QWidget):
         space_shortcut.activated.connect(self._select_next_asset)
         self._shortcut_refs.append(space_shortcut)
 
-        focus_shortcut = QShortcut(QKeySequence("F"), self)
-        focus_shortcut.activated.connect(self._toggle_focus_mode_shortcut)
-        self._shortcut_refs.append(focus_shortcut)
-
         info_shortcut = QShortcut(QKeySequence("I"), self)
         info_shortcut.activated.connect(self._toggle_overlay_shortcut)
         self._shortcut_refs.append(info_shortcut)
 
     def refresh_data(self) -> None:
+        self._refresh_collection_combo()
+        self._refresh_filter_combo()
         self._load_assets()
+
+    def _show_busy(self) -> None:
+        self._busy_overlay.setGeometry(self.rect())
+        self._busy_overlay.raise_()
+        self._busy_overlay.setVisible(True)
+        self._busy_spinner.start()
+        # NOTE: do NOT call QApplication.processEvents() here — it re-enters the
+        # event loop and can dispatch timers / resize events / stale singleShot
+        # callbacks in the middle of a state transition, causing segfaults.
+
+    def _hide_busy(self) -> None:
+        self._busy_spinner.stop()
+        self._busy_overlay.setVisible(False)
 
     def set_selected_project(self, project_id: int) -> None:
         self._selected_project_id = project_id
-        self._load_assets()
+        self._active_collection_id = None
+        self._refresh_collection_combo()
+        self._refresh_filter_combo()
+        self._show_busy()
+        # Defer by one event-loop tick so Qt paints the busy overlay before
+        # we start the background load.  Store the target ID to detect staleness.
+        self._pending_load_project_id = project_id
+        QTimer.singleShot(0, lambda: self._load_assets(show_busy=True))
 
-    def _load_assets(self) -> None:
+    def _refresh_filter_combo(self) -> None:
+        prev = self.rejected_mode_combo.currentData()
+        self.rejected_mode_combo.blockSignals(True)
+        try:
+            self.rejected_mode_combo.clear()
+            self.rejected_mode_combo.addItem("Tout", userData="all")
+            self.rejected_mode_combo.addItem("A garder", userData="kept")
+            self.rejected_mode_combo.addItem("Rejetées", userData="rejected")
+            if self._selected_project_id is not None:
+                try:
+                    cols = self.collection_service.list_collections(
+                        project_id=self._selected_project_id
+                    )
+                    for col, _count in cols:
+                        self.rejected_mode_combo.addItem(col.name, userData=f"col:{col.id}")
+                except Exception:
+                    pass
+                try:
+                    labels = self.culling_service.list_distinct_color_labels(
+                        self._selected_project_id
+                    )
+                    for lbl in labels:
+                        self.rejected_mode_combo.addItem(lbl, userData=f"cat:{lbl}")
+                except Exception:
+                    pass
+            idx = self.rejected_mode_combo.findData(prev)
+            if idx >= 0:
+                self.rejected_mode_combo.setCurrentIndex(idx)
+        finally:
+            self.rejected_mode_combo.blockSignals(False)
+
+    def _cancel_asset_loader(self) -> None:
+        """Cancel any in-flight background asset-list query."""
+        if self._asset_loader_thread is not None:
+            self._asset_loader_thread.cancel()
+            # Safe to drop the Python ref: _AssetQueryThread keeps main-thread
+            # affinity (QThread rule), so Python GC from the main thread will
+            # never trigger the "setParent: different thread" warning.
+            self._asset_loader_thread = None
+
+    def _load_assets(self, *, show_busy: bool = False) -> None:
+        """Start a background query for the current project's asset list.
+
+        The UI thread is never blocked by the SQLite query.  The filmstrip is
+        built in _on_assets_fetched() once the worker emits its result signal.
+        """
+        self._cancel_asset_loader()
         project_id = self._selected_project_id
+
         if project_id is None:
+            if show_busy:
+                self._hide_busy()
             self._clear_asset_cards()
             self._clear_filmstrip()
             self._set_selected_asset(None)
@@ -2866,14 +3532,77 @@ class CullingTab(QWidget):
             self.path_overlay_label.setVisible(False)
             return
 
-        rejected_mode = self.rejected_mode_combo.currentData()
-        min_rating = int(self.min_rating_filter_combo.currentData() or 0)
-        
-        assets = self.culling_service.list_assets(
-            project_id=project_id,
-            rejected_mode=rejected_mode,
-            min_rating=min_rating
+        # Capture filter state so the worker closure and the stale-result guard
+        # both reference the same snapshot.
+        target_project_id = int(project_id)
+        raw_mode = self.rejected_mode_combo.currentData() or "all"
+        color_label_filter: str | None = None
+        col_filter_id: int | None = None
+        if isinstance(raw_mode, str) and raw_mode.startswith("cat:"):
+            rejected_mode = "all"
+            color_label_filter = raw_mode[4:]
+        elif isinstance(raw_mode, str) and raw_mode.startswith("col:"):
+            rejected_mode = "all"
+            col_filter_id = int(raw_mode[4:])
+        else:
+            rejected_mode = raw_mode
+        min_rating = self._cull_min_rating
+        culling_svc = self.culling_service
+        collection_svc = self.collection_service
+
+        def _fetch(progress_cb, is_cancelled):  # noqa: ARG001 — injected by JobWorker
+            result = culling_svc.list_assets(
+                project_id=target_project_id,
+                rejected_mode=rejected_mode,
+                min_rating=min_rating,
+                color_label_filter=color_label_filter,
+            )
+            if col_filter_id is not None:
+                try:
+                    col_ids = set(collection_svc.get_asset_ids(collection_id=col_filter_id))
+                    result = [a for a in result if int(a.id) in col_ids]
+                except Exception:
+                    pass
+            return result
+
+        thread = _AssetQueryThread(_fetch)
+        # QueuedConnection is required: _AssetQueryThread.run() executes in a
+        # new OS thread, so result is emitted from there.  Both the thread object
+        # and self (CullingTab) have main-thread affinity → Qt would default to
+        # DirectConnection and call _on_assets_fetched on the background thread.
+        # Explicit QueuedConnection posts the call to the main-thread event loop.
+        thread.result.connect(
+            lambda assets, _pid=target_project_id, _busy=show_busy:
+                self._on_assets_fetched(assets, _pid, _busy),
+            Qt.ConnectionType.QueuedConnection,
         )
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        self._asset_loader_thread = thread
+
+    def _on_assets_fetched(self, assets, project_id_at_start: int, was_busy: bool) -> None:
+        """UI-thread slot — called when the background asset query completes."""
+        if was_busy:
+            self._hide_busy()
+        # Discard stale results from a superseded project switch.
+        if self._selected_project_id != project_id_at_start:
+            return
+        self._apply_assets(assets if assets is not None else [])
+
+    def _apply_assets(self, assets: list) -> None:
+        """Build (or clear) the filmstrip from a pre-fetched asset list."""
+        if not assets:
+            self._clear_asset_cards()
+            self._clear_filmstrip()
+            self._set_selected_asset(None)
+            self.assets_by_id = {}
+            self.asset_order = []
+            if self._prefetch_manager is not None:
+                self._prefetch_manager.update_sequence([])
+            self.preview_label.setText("Aucun asset")
+            self.info_overlay_label.setText("Aucun asset")
+            self.path_overlay_label.setVisible(False)
+            return
 
         current_asset_id = self._selected_asset_id()
         self.assets_by_id = {int(asset.id): asset for asset in assets}
@@ -2912,6 +3641,7 @@ class CullingTab(QWidget):
     def _clear_filmstrip(self) -> None:
         self.filmstrip_buttons = {}
         self._filmstrip_window = (0, -1)
+        self._prev_selected_filmstrip_id = None
         while self.filmstrip_layout.count():
             item = self.filmstrip_layout.takeAt(0)
             widget = item.widget()
@@ -2948,37 +3678,103 @@ class CullingTab(QWidget):
             self._ensure_selected_thumb_visible()
             return
 
+        # For small window shifts, slide incrementally (O(shift)) instead of full rebuild.
+        old_start, old_end = self._filmstrip_window
+        shift = abs(start - old_start)
+        if (
+            not force
+            and self.filmstrip_buttons  # existing filmstrip present
+            and old_end >= old_start    # valid previous window
+            and 0 < shift <= 15         # small shift only
+        ):
+            self._slide_filmstrip_window(start, end, old_start, old_end)
+            return
+
         self._clear_filmstrip()
         self._filmstrip_window = (start, end)
-        thumb_w = 136
-        thumb_h = 86
+        self._pending_thumb_ids.clear()
+        thumb_w = 106
+        thumb_h = 70
         self.filmstrip_content.setMinimumHeight(thumb_h + 20)
         for idx in range(start, end + 1):
-            asset_id = int(self.asset_order[idx])
-            asset = self.assets_by_id.get(asset_id)
-            if asset is None:
-                continue
-            btn = QToolButton()
-            btn.setObjectName("FilmThumb")
-            btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-            btn.setIconSize(QSize(thumb_w, thumb_h))
-            btn.setFixedSize(thumb_w + 18, thumb_h + 18)
-            btn.setToolTip(asset.file_name)
-            btn.setProperty("selected", "false")
-            btn.clicked.connect(lambda _checked=False, aid=asset_id: self._on_filmstrip_clicked(aid))
-            thumb = self._load_thumb_pixmap(Path(str(asset.src_path)), thumb_w, thumb_h)
-            if thumb.isNull():
-                fallback = QPixmap(thumb_w, thumb_h)
-                fallback.fill(QColor("#2B2B2B"))
-                btn.setIcon(QIcon(fallback))
-            else:
-                btn.setIcon(QIcon(thumb))
-            self.filmstrip_buttons[asset_id] = btn
-            self.filmstrip_layout.addWidget(btn)
+            if idx >= len(self.asset_order):
+                break
+            btn = self._make_filmstrip_btn(int(self.asset_order[idx]), thumb_w, thumb_h)
+            if btn is not None:
+                self.filmstrip_layout.addWidget(btn)
         self.filmstrip_layout.addStretch(1)
         self._refresh_filmstrip_selection()
         self._ensure_selected_thumb_visible()
+        if self._pending_thumb_ids:
+            self._thumb_fill_timer.start()
+
+    def _make_filmstrip_btn(self, asset_id: int, thumb_w: int = 106, thumb_h: int = 70) -> QToolButton | None:
+        """Create a single filmstrip button; schedules async thumb if not cached."""
+        asset = self.assets_by_id.get(asset_id)
+        if asset is None:
+            return None
+        btn = QToolButton()
+        btn.setObjectName("FilmThumb")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        btn.setIconSize(QSize(thumb_w, thumb_h))
+        btn.setFixedSize(thumb_w + 16, thumb_h + 16)
+        btn.setToolTip(asset.file_name)
+        btn.setProperty("selected", "false")
+        btn.clicked.connect(lambda _checked=False, aid=asset_id: self._on_filmstrip_clicked(aid))
+        thumb = self._load_thumb_pixmap_cached_only(Path(str(asset.src_path)), thumb_w, thumb_h)
+        if thumb is None or thumb.isNull():
+            placeholder = QPixmap(thumb_w, thumb_h)
+            placeholder.fill(QColor("#2B2B2B"))
+            btn.setIcon(QIcon(placeholder))
+            self._pending_thumb_ids.add(asset_id)
+            if self._prefetch_manager is not None:
+                self._prefetch_manager.prefetch_thumb(
+                    Path(str(asset.src_path)), width=thumb_w, height=thumb_h
+                )
+        else:
+            btn.setIcon(QIcon(thumb))
+        self.filmstrip_buttons[asset_id] = btn
+        return btn
+
+    def _slide_filmstrip_window(self, new_start: int, new_end: int, old_start: int, old_end: int) -> None:
+        """Incrementally update the filmstrip by only adding/removing edge buttons."""
+        thumb_w, thumb_h = 106, 70
+        # Remove buttons that scrolled out of the left edge
+        for idx in range(old_start, min(new_start, old_end + 1)):
+            if idx < len(self.asset_order):
+                aid = int(self.asset_order[idx])
+                btn = self.filmstrip_buttons.pop(aid, None)
+                if btn is not None:
+                    self.filmstrip_layout.removeWidget(btn)
+                    btn.deleteLater()
+        # Remove buttons that scrolled out of the right edge
+        for idx in range(max(new_end + 1, old_start), old_end + 1):
+            if idx < len(self.asset_order):
+                aid = int(self.asset_order[idx])
+                btn = self.filmstrip_buttons.pop(aid, None)
+                if btn is not None:
+                    self.filmstrip_layout.removeWidget(btn)
+                    btn.deleteLater()
+        # Add buttons entering from the right edge (append before stretch)
+        for idx in range(max(old_end + 1, new_start), new_end + 1):
+            if idx < len(self.asset_order):
+                btn = self._make_filmstrip_btn(int(self.asset_order[idx]), thumb_w, thumb_h)
+                if btn is not None:
+                    # Insert before the trailing stretch item
+                    self.filmstrip_layout.insertWidget(self.filmstrip_layout.count() - 1, btn)
+        # Add buttons entering from the left edge (prepend)
+        insert_pos = 0
+        for idx in range(min(old_start - 1, new_end), new_start - 1, -1):
+            if 0 <= idx < len(self.asset_order):
+                btn = self._make_filmstrip_btn(int(self.asset_order[idx]), thumb_w, thumb_h)
+                if btn is not None:
+                    self.filmstrip_layout.insertWidget(insert_pos, btn)
+        self._filmstrip_window = (new_start, new_end)
+        self._refresh_filmstrip_selection()
+        self._ensure_selected_thumb_visible()
+        if self._pending_thumb_ids:
+            self._thumb_fill_timer.start()
 
     def _on_filmstrip_clicked(self, asset_id: int) -> None:
         self._set_selected_asset(int(asset_id))
@@ -2986,12 +3782,37 @@ class CullingTab(QWidget):
 
     def _refresh_filmstrip_selection(self) -> None:
         selected_id = self._selected_asset_id()
-        for asset_id, btn in self.filmstrip_buttons.items():
-            is_selected = selected_id is not None and int(asset_id) == int(selected_id)
-            btn.setProperty("selected", "true" if is_selected else "false")
-            btn.style().unpolish(btn)
-            btn.style().polish(btn)
-            btn.update()
+        prev_id = self._prev_selected_filmstrip_id
+
+        # Fast path: only repaint the two buttons that actually changed state.
+        # This avoids O(N) style recalculations across the entire filmstrip on
+        # every arrow-key press.
+        changed_ids: list[int] = []
+        if prev_id is not None and prev_id != selected_id:
+            changed_ids.append(prev_id)
+        if selected_id is not None:
+            changed_ids.append(selected_id)
+
+        if changed_ids:
+            for aid in changed_ids:
+                btn = self.filmstrip_buttons.get(aid)
+                if btn is None:
+                    continue
+                is_selected = selected_id is not None and aid == int(selected_id)
+                btn.setProperty("selected", "true" if is_selected else "false")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+                btn.update()
+        else:
+            # Fallback: full repaint (e.g. after a force-rebuild of the filmstrip).
+            for asset_id, btn in self.filmstrip_buttons.items():
+                is_selected = selected_id is not None and int(asset_id) == int(selected_id)
+                btn.setProperty("selected", "true" if is_selected else "false")
+                btn.style().unpolish(btn)
+                btn.style().polish(btn)
+                btn.update()
+
+        self._prev_selected_filmstrip_id = selected_id
 
     def _ensure_selected_thumb_visible(self) -> None:
         selected_id = self._selected_asset_id()
@@ -3022,8 +3843,65 @@ class CullingTab(QWidget):
                     pixmap = QPixmap(str(cached_path))
         if pixmap.isNull():
             pixmap = QPixmap(str(resolved)) if resolved.exists() else QPixmap()
-        self._cache_put(self._preview_cache, self._preview_cache_order, key, pixmap, 24)
+        self._cache_put(self._preview_cache, key, pixmap, 24)
         return pixmap
+
+    def _load_thumb_pixmap_cached_only(self, file_path: Path | None, width: int, height: int) -> QPixmap | None:
+        """Return a thumbnail only if already in memory or disk cache; never blocks on I/O."""
+        if file_path is None:
+            return None
+        resolved = Path(file_path).expanduser().resolve()
+        key = f"{resolved}|{width}x{height}"
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            return cached
+        if self._prefetch_manager is not None:
+            cached_path = self._prefetch_manager.get_cached_thumb_path(resolved, width=width, height=height)
+            if cached_path is not None and cached_path.exists():
+                thumb = QPixmap(str(cached_path))
+                if not thumb.isNull():
+                    self._cache_put(self._thumb_cache, key, thumb, 420)
+                    return thumb
+        return None
+
+    def _fill_pending_filmstrip_thumbs(self) -> None:
+        """Timer callback — update filmstrip buttons whose disk-cached thumb is now ready.
+
+        After _THUMB_FALLBACK_TICKS failed polls (≈2 s) the method falls back to
+        _load_thumb_pixmap() which uses direct QPixmap loading — this handles photo
+        formats that DiskImageCache/PIL cannot open (e.g. HEIC with system plugins).
+        """
+        if not self._pending_thumb_ids:
+            self._thumb_fill_timer.stop()
+            return
+        thumb_w, thumb_h = 106, 70
+        _THUMB_FALLBACK_TICKS = 10
+        still_pending: set[int] = set()
+        for asset_id in list(self._pending_thumb_ids):
+            btn = self.filmstrip_buttons.get(asset_id)
+            asset = self.assets_by_id.get(asset_id)
+            if btn is None or asset is None:
+                self._thumb_retry_count.pop(asset_id, None)
+                continue
+            thumb = self._load_thumb_pixmap_cached_only(Path(str(asset.src_path)), thumb_w, thumb_h)
+            if thumb is None or thumb.isNull():
+                retries = self._thumb_retry_count.get(asset_id, 0) + 1
+                self._thumb_retry_count[asset_id] = retries
+                if retries >= _THUMB_FALLBACK_TICKS:
+                    # DiskImageCache path exhausted — fall back to direct load.
+                    thumb = self._load_thumb_pixmap(Path(str(asset.src_path)), thumb_w, thumb_h)
+                    self._thumb_retry_count.pop(asset_id, None)
+                else:
+                    still_pending.add(asset_id)
+                    continue
+            if thumb is not None and not thumb.isNull():
+                try:
+                    btn.setIcon(QIcon(thumb))
+                except RuntimeError:
+                    pass  # C++ widget deleted before timer fired
+        self._pending_thumb_ids = still_pending
+        if not still_pending:
+            self._thumb_fill_timer.stop()
 
     def _load_thumb_pixmap(self, file_path: Path | None, width: int, height: int) -> QPixmap:
         if file_path is None:
@@ -3039,7 +3917,7 @@ class CullingTab(QWidget):
             if cached_thumb_path is not None and cached_thumb_path.exists():
                 thumb = QPixmap(str(cached_thumb_path))
                 if not thumb.isNull():
-                    self._cache_put(self._thumb_cache, self._thumb_cache_order, key, thumb, 420)
+                    self._cache_put(self._thumb_cache, key, thumb, 420)
                     return thumb
 
         source = self._load_preview_pixmap(resolved)
@@ -3051,21 +3929,17 @@ class CullingTab(QWidget):
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
-        self._cache_put(self._thumb_cache, self._thumb_cache_order, key, thumb, 420)
+        self._cache_put(self._thumb_cache, key, thumb, 420)
         return thumb
 
     @staticmethod
-    def _cache_put(cache: dict[str, QPixmap], order: list[str], key: str, value: QPixmap, max_size: int) -> None:
+    def _cache_put(cache: "OrderedDict[str, QPixmap]", key: str, value: QPixmap, max_size: int) -> None:
+        # O(1) LRU via OrderedDict: move existing keys to the end, evict from the front.
         if key in cache:
-            try:
-                order.remove(key)
-            except ValueError:
-                pass
+            cache.move_to_end(key)
         cache[key] = value
-        order.append(key)
-        while len(order) > max(1, int(max_size)):
-            stale = order.pop(0)
-            cache.pop(stale, None)
+        while len(cache) > max(1, int(max_size)):
+            cache.popitem(last=False)
 
     def _prefetch_neighbors(self) -> None:
         index = self._selected_asset_index()
@@ -3108,19 +3982,11 @@ class CullingTab(QWidget):
         for key in list(self._preview_cache.keys()):
             if key not in keep_paths:
                 self._preview_cache.pop(key, None)
-                try:
-                    self._preview_cache_order.remove(key)
-                except ValueError:
-                    pass
 
         for key in list(self._thumb_cache.keys()):
             src_key = str(key).split("|", 1)[0]
             if src_key not in keep_paths:
                 self._thumb_cache.pop(key, None)
-                try:
-                    self._thumb_cache_order.remove(key)
-                except ValueError:
-                    pass
 
     def _render_asset_cards(self, assets: list) -> None:
         self._clear_asset_cards()
@@ -3261,13 +4127,18 @@ class CullingTab(QWidget):
             self.preview_label.setText("Apercu indisponible")
             resolution = "-"
         else:
-            self.preview_label.setText("")
             scaled = preview_pixmap.scaled(
                 self.preview_label.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation,
             )
-            self.preview_label.setPixmap(scaled)
+            direction = self._pending_slide_direction
+            self._pending_slide_direction = None
+            if direction:
+                self.preview_label.slide(direction, scaled)
+            else:
+                self.preview_label.setText("")
+                self.preview_label.setPixmap(scaled)
             resolution = f"{preview_pixmap.width()}x{preview_pixmap.height()}"
 
         name = file_path.name if file_path else "-"
@@ -3280,11 +4151,14 @@ class CullingTab(QWidget):
             f"{display_index}/{len(self.asset_order)} | {name} | {rating} ★ | {resolution}{reject_flag}"
         )
         self._update_overlay_visibility()
+        self._update_collection_overlay()
         self._prefetch_neighbors()
         self._render_filmstrip(force=False)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self._busy_overlay.setGeometry(self.rect())
+        self._busy_overlay.raise_()
         # Keep preview readable when panel size changes.
         self._on_select_asset()
 
@@ -3295,21 +4169,11 @@ class CullingTab(QWidget):
         splitter.setSizes([0, max(1, int(splitter.width()))])
         self._render_filmstrip(force=True)
 
-    def _toggle_focus_mode_shortcut(self) -> None:
-        self.focus_mode_btn.setChecked(not self.focus_mode_btn.isChecked())
-
-    def _set_focus_mode(self, enabled: bool) -> None:
-        self.focus_mode_enabled = bool(enabled)
-        self._apply_culling_layout_mode()
-        if self.focus_mode_enabled:
-            self.on_job_event("[Tri] Mode focus active.")
-        else:
-            self.on_job_event("[Tri] Mode focus desactive.")
-
-    def _apply_culling_layout_mode(self) -> None:
-        hide_chrome = bool(self.focus_mode_enabled)
-        self.controls_box.setVisible(not hide_chrome)
-        self.filmstrip_frame.setVisible(not hide_chrome)
+    def _set_cull_rating_filter(self, n: int) -> None:
+        self._cull_min_rating = 0 if self._cull_min_rating == n else n
+        for i, btn in enumerate(self._cull_star_btns, start=1):
+            btn.setIcon(_star_icon(i <= self._cull_min_rating))
+        self._load_assets()
 
     def _toggle_overlay_shortcut(self) -> None:
         self.overlay_toggle_btn.setChecked(not self.overlay_toggle_btn.isChecked())
@@ -3366,11 +4230,308 @@ class CullingTab(QWidget):
         self._set_selected_asset(target_id)
         self._on_select_asset()
 
+    def _on_star_hover(self, index: int) -> None:
+        for i, btn in enumerate(self.star_btns):
+            btn.setStyleSheet("color: #FACC15;" if i <= index else "")
+
+    def _on_star_leave(self) -> None:
+        for btn in self.star_btns:
+            btn.setStyleSheet("")
+
+    # ── Collection helpers ────────────────────────────────────────────────
+
+    def _refresh_collection_combo(self) -> None:
+        project_id = self._selected_project_id
+        prev_id = self._active_collection_id
+        self.collection_combo.blockSignals(True)
+        self.collection_combo.clear()
+        self.collection_combo.addItem("— Aucune —", userData=None)
+        if project_id is not None:
+            try:
+                cols = self.collection_service.list_collections(project_id=project_id)
+                for col, count in cols:
+                    self.collection_combo.addItem(f"{col.name} ({count})", userData=int(col.id))
+            except Exception:
+                pass
+        if prev_id is not None:
+            idx = self.collection_combo.findData(int(prev_id))
+            if idx >= 0:
+                self.collection_combo.setCurrentIndex(idx)
+        self.collection_combo.blockSignals(False)
+        self._active_collection_id = self.collection_combo.currentData()
+
+    def _on_collection_changed(self, index: int) -> None:
+        col_id = self.collection_combo.currentData()
+        self._active_collection_id = int(col_id) if col_id is not None else None
+        self._refresh_collection_cache()
+        self._update_collection_overlay()
+
+    def _refresh_collection_cache(self) -> None:
+        if self._active_collection_id is None:
+            self._collection_asset_ids = set()
+        else:
+            try:
+                ids = self.collection_service.get_asset_ids(
+                    collection_id=self._active_collection_id
+                )
+                self._collection_asset_ids = set(ids)
+            except Exception:
+                self._collection_asset_ids = set()
+
+    def _update_collection_overlay(self) -> None:
+        asset_id = self._selected_asset_id()
+        has_collection = self._active_collection_id is not None
+        self.collection_overlay_btn.setEnabled(has_collection and asset_id is not None)
+        if has_collection and asset_id is not None:
+            in_col = int(asset_id) in self._collection_asset_ids
+            if in_col:
+                self.collection_overlay_btn.setText("Dans la collection")
+                self.collection_overlay_btn.setIcon(_make_svg_icon(_SVG_CHEVRON_DOWN_GREEN, 14))
+                self.collection_overlay_btn.setIconSize(QSize(14, 14))
+                self.collection_overlay_btn.setStyleSheet(
+                    "QToolButton#CollectionOverlayBtn { color: #6EF5C2; font-size: 13px;"
+                    " border: none; background: transparent; padding: 2px 4px; }"
+                    "QToolButton#CollectionOverlayBtn:hover { color: #a7f3d0; }"
+                )
+            else:
+                self.collection_overlay_btn.setText("Ajouter à la collection")
+                self.collection_overlay_btn.setIcon(QIcon())
+                self.collection_overlay_btn.setStyleSheet(
+                    "QToolButton#CollectionOverlayBtn { color: #94a3b8; font-size: 13px;"
+                    " border: none; background: transparent; padding: 2px 4px; }"
+                    "QToolButton#CollectionOverlayBtn:hover { color: #cbd5e1; }"
+                )
+        else:
+            self.collection_overlay_btn.setText("Ajouter à la collection")
+            self.collection_overlay_btn.setIcon(QIcon())
+
+    def _toggle_collection_membership(self) -> None:
+        asset_id = self._selected_asset_id()
+        if asset_id is None or self._active_collection_id is None:
+            return
+        in_col = int(asset_id) in self._collection_asset_ids
+
+        if not in_col:
+            # Simple add
+            self.collection_service.add_assets(
+                collection_id=self._active_collection_id, asset_ids=[int(asset_id)]
+            )
+            self._refresh_collection_cache()
+            self._update_collection_overlay()
+            self.on_data_changed()
+            return
+
+        # Asset is already in the collection → show action menu
+        menu = QMenu(self.collection_overlay_btn)
+        act_remove = menu.addAction("−  Retirer de la collection")
+        menu.addSeparator()
+
+        # Build "Déplacer vers" entries for other collections in this project
+        move_targets: dict[int, int] = {}  # QAction id → collection_id
+        try:
+            cols = self.collection_service.list_collections(project_id=self._selected_project_id)
+            other_cols = [(col, cnt) for col, cnt in cols if int(col.id) != self._active_collection_id]
+            if other_cols:
+                header = menu.addAction("Déplacer vers :")
+                header.setEnabled(False)
+                for col, _ in other_cols:
+                    act = menu.addAction(f"  → {col.name}")
+                    move_targets[id(act)] = int(col.id)
+        except Exception:
+            pass
+
+        chosen = menu.exec(
+            self.collection_overlay_btn.mapToGlobal(
+                self.collection_overlay_btn.rect().bottomLeft()
+            )
+        )
+        if chosen is None:
+            return
+
+        if chosen is act_remove:
+            self.collection_service.remove_assets(
+                collection_id=self._active_collection_id, asset_ids=[int(asset_id)]
+            )
+        elif id(chosen) in move_targets:
+            target_col_id = move_targets[id(chosen)]
+            self.collection_service.remove_assets(
+                collection_id=self._active_collection_id, asset_ids=[int(asset_id)]
+            )
+            self.collection_service.add_assets(
+                collection_id=target_col_id, asset_ids=[int(asset_id)]
+            )
+
+        self._refresh_collection_cache()
+        self._update_collection_overlay()
+        self.on_data_changed()
+
+    def _create_collection(self) -> None:
+        project_id = self._selected_project_id
+        if project_id is None:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Nouvelle collection", "Nom de la collection:")
+        if not ok or not name.strip():
+            return
+        try:
+            col = self.collection_service.create_collection(
+                project_id=project_id, name=name.strip()
+            )
+            self.on_data_changed()
+            # Select the new collection
+            for i in range(self.collection_combo.count()):
+                if self.collection_combo.itemData(i) == int(col.id):
+                    self.collection_combo.setCurrentIndex(i)
+                    break
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur collection", str(exc))
+
+    def _rename_active_collection(self) -> None:
+        if self._active_collection_id is None:
+            QMessageBox.information(self, "Collection", "Sélectionnez d'abord une collection.")
+            return
+        from PySide6.QtWidgets import QInputDialog
+        current_name = self.collection_combo.currentText().split(" (")[0]
+        name, ok = QInputDialog.getText(
+            self, "Renommer la collection", "Nouveau nom :", text=current_name
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            self.collection_service.rename_collection(
+                collection_id=self._active_collection_id, name=name.strip()
+            )
+            self.on_data_changed()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur collection", str(exc))
+
+    def _add_selected_to_collection(self) -> None:
+        if self._active_collection_id is None:
+            QMessageBox.information(self, "Collection", "Sélectionnez d'abord une collection.")
+            return
+        asset_id = self._selected_asset_id()
+        if asset_id is None:
+            return
+        try:
+            self.collection_service.add_assets(
+                collection_id=self._active_collection_id,
+                asset_ids=[asset_id],
+            )
+            self.on_data_changed()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur collection", str(exc))
+
+    def _remove_selected_from_collection(self) -> None:
+        if self._active_collection_id is None:
+            return
+        asset_id = self._selected_asset_id()
+        if asset_id is None:
+            return
+        try:
+            self.collection_service.remove_assets(
+                collection_id=self._active_collection_id,
+                asset_ids=[asset_id],
+            )
+            self.on_data_changed()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur collection", str(exc))
+
+    def _delete_active_collection(self) -> None:
+        if self._active_collection_id is None:
+            return
+        name = self.collection_combo.currentText()
+        reply = QMessageBox.question(
+            self,
+            "Supprimer la collection",
+            f"Supprimer « {name} » ? Les photos ne seront pas effacées.",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.collection_service.delete_collection(collection_id=self._active_collection_id)
+            self._active_collection_id = None
+            self.on_data_changed()
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur collection", str(exc))
+
     def _mark_selected_keep(self) -> None:
+        if self.auto_advance_check.isChecked():
+            self._pending_slide_direction = "right"
         self._set_selected_rejected_state(False, hud_text="KEEP", hud_state="ok")
 
     def _mark_selected_reject(self) -> None:
+        if self.auto_advance_check.isChecked():
+            self._pending_slide_direction = "left"
         self._set_selected_rejected_state(True, hud_text="REJECT", hud_state="warn")
+
+    def _fast_cull_refresh(self, asset_id: int, **updates) -> None:
+        """Update one asset in-memory and refresh the UI without a full DB re-query.
+
+        `updates` keys: rating (int), is_rejected (bool).
+        Removes the asset from the visible list if it no longer passes the active filter,
+        then re-renders the filmstrip incrementally.
+        """
+        item = self.assets_by_id.get(asset_id)
+        if item is None:
+            return
+
+        # Apply updates to the cached dataclass.
+        for key, val in updates.items():
+            if hasattr(item, key):
+                setattr(item, key, val)
+
+        # Check if the asset still passes the current filter.
+        _raw_mode = self.rejected_mode_combo.currentData() or "all"
+        _color_filter: str | None = None
+        if isinstance(_raw_mode, str) and _raw_mode.startswith("cat:"):
+            rejected_mode = "all"
+            _color_filter = _raw_mode[4:]
+        elif isinstance(_raw_mode, str) and _raw_mode.startswith("col:"):
+            rejected_mode = "all"
+        else:
+            rejected_mode = _raw_mode
+        min_rating = self._cull_min_rating
+        passes = True
+        if rejected_mode == "kept" and item.is_rejected:
+            passes = False
+        elif rejected_mode == "rejected" and not item.is_rejected:
+            passes = False
+        if _color_filter is not None and item.color_label != _color_filter:
+            passes = False
+        if item.rating < min_rating:
+            passes = False
+
+        if not passes:
+            # Remove asset from the ordered list and filmstrip.
+            self.assets_by_id.pop(asset_id, None)
+            try:
+                self.asset_order.remove(asset_id)
+            except ValueError:
+                pass
+            btn = self.filmstrip_buttons.pop(asset_id, None)
+            if btn is not None:
+                self.filmstrip_layout.removeWidget(btn)
+                btn.deleteLater()
+            # Update prefetch sequence after removal.
+            if self._prefetch_manager is not None:
+                sequence_paths = [
+                    str(self.assets_by_id[aid].src_path)
+                    for aid in self.asset_order
+                    if aid in self.assets_by_id and getattr(self.assets_by_id[aid], "src_path", None)
+                ]
+                self._prefetch_manager.update_sequence(sequence_paths)
+            # If the removed asset was selected, move to neighbor.
+            if self.selected_asset_id == asset_id:
+                self.selected_asset_id = self.asset_order[0] if self.asset_order else None
+
+        self._render_filmstrip()
+        if self._selected_asset_id() is None:
+            self.preview_label.setText("Aucun asset")
+            self.info_overlay_label.setText("Aucun asset")
+            self.path_overlay_label.setVisible(False)
+        else:
+            self._set_selected_asset(self.selected_asset_id)
+            self._on_select_asset()
 
     def _set_selected_rejected_state(self, rejected: bool, hud_text: str, hud_state: str) -> None:
         asset_id = self._selected_asset_id()
@@ -3381,7 +4542,7 @@ class CullingTab(QWidget):
             self.culling_service.update_asset(asset_id=asset_id, is_rejected=bool(rejected))
             if next_id is not None:
                 self.selected_asset_id = int(next_id)
-            self._load_assets()
+            self._fast_cull_refresh(asset_id, is_rejected=bool(rejected))
             self._show_hud(hud_text, hud_state)
         except Exception as exc:
             QMessageBox.critical(self, "Erreur tri", str(exc))
@@ -3411,7 +4572,7 @@ class CullingTab(QWidget):
             self.culling_service.update_asset(asset_id=asset_id, rating=safe_rating)
             if next_id is not None:
                 self.selected_asset_id = int(next_id)
-            self._load_assets()
+            self._fast_cull_refresh(asset_id, rating=safe_rating)
             self._show_hud(f"NOTE {safe_rating}", "ok")
         except Exception as exc:
             QMessageBox.critical(self, "Erreur tri", str(exc))
@@ -3424,7 +4585,7 @@ class CullingTab(QWidget):
         target_rejected = not bool(getattr(current, "is_rejected", False))
         try:
             self.culling_service.update_asset(asset_id=asset_id, is_rejected=target_rejected)
-            self._load_assets()
+            self._fast_cull_refresh(asset_id, is_rejected=target_rejected)
             self._show_hud("REJECT" if target_rejected else "KEEP", "warn" if target_rejected else "ok")
         except Exception as exc:
             QMessageBox.critical(self, "Erreur tri", str(exc))
@@ -3448,8 +4609,9 @@ class CullingTab(QWidget):
             QMessageBox.warning(self, "Validation", "Selectionne un projet.")
             return
 
-        rejected_mode = self.rejected_mode_combo.currentData()
-        min_rating = int(self.min_rating_filter_combo.currentData() or 0)
+        _raw_bulk = self.rejected_mode_combo.currentData() or "all"
+        rejected_mode = "all" if (isinstance(_raw_bulk, str) and _raw_bulk.startswith("cat:")) else _raw_bulk
+        min_rating = self._cull_min_rating
     def _on_asset_card_selected(self, asset_id: int) -> None:
         self._set_selected_asset(asset_id)
         self._on_select_asset()
@@ -3476,12 +4638,17 @@ class CullingTab(QWidget):
         super().closeEvent(event)
 
 
+_EDIT_CHUNK_SIZE = 40  # Cards rendered per event-loop tick in EditTab
+
+
 class EditTab(QWidget):
     def __init__(
         self,
         project_service: ProjectService,
         edit_service: EditService,
         metadata_service: MetadataService,
+        collection_service: CollectionService,
+        culling_service: CullingService,
         on_operation_started,
         on_operation_ended,
         on_job_event=None,
@@ -3490,6 +4657,8 @@ class EditTab(QWidget):
         self.project_service = project_service
         self.edit_service = edit_service
         self.metadata_service = metadata_service
+        self.collection_service = collection_service
+        self.culling_service = culling_service
         self.on_operation_started = on_operation_started
         self.on_operation_ended = on_operation_ended
         self.on_job_event = on_job_event or (lambda _message: None)
@@ -3506,6 +4675,9 @@ class EditTab(QWidget):
         self._render_timer.timeout.connect(self._apply_edit_preview)
         
         self._base_image: Image.Image | None = None
+        self._last_rendered_img_size: tuple[int, int] | None = None
+        self._crop_pan_x: int = 0
+        self._crop_pan_y: int = 0
         self._form_loading = False
         self._metadata_form_loading = False
         self._before_mode = False
@@ -3516,14 +4688,39 @@ class EditTab(QWidget):
         self.assets_by_id: dict[int, object] = {}
         self.asset_order: list[int] = []
         self.asset_card_widgets: dict[int, QFrame] = {}
-        self._thumb_cache: dict[str, QPixmap] = {}
-        self._thumb_cache_order: list[str] = []
+        self._thumb_cache: OrderedDict[str, QPixmap] = OrderedDict()
+
+        # Lazy loading: defer _load_assets() until the tab becomes visible.
+        self._load_pending: bool = False
+        self._busy_overlay: QFrame | None = None  # created later, guard resizeEvent
+
+        self._chunk_timer = QTimer(self)
+        self._chunk_timer.setInterval(16)
+        self._chunk_timer.timeout.connect(self._render_next_chunk)
+        self._pending_assets: list = []
+
+        # Async thumbnail loading via DiskImageCache + background executor.
+        self._disk_cache = None
+        try:
+            from ..services.preload import DiskImageCache as _DiskImageCache
+            _cache_root = Path(project_service.paths.data_dir) / "cache" / "images"
+            self._disk_cache = _DiskImageCache(_cache_root)
+        except Exception:
+            pass
+        self._pending_thumb_labels: dict[str, QLabel] = {}
+        self._thumb_executor = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="ph-edit-thumb"
+        )
+        self._edit_thumb_timer = QTimer(self)
+        self._edit_thumb_timer.setInterval(200)
+        self._edit_thumb_timer.timeout.connect(self._fill_pending_edit_thumbs)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
         self._selected_project_id: Optional[int] = None
+        self._active_collection_id: int | None = None
 
         # ── 1. Top Control Bar (Toolbar) ──
         toolbar_card = BentoCard()
@@ -3540,38 +4737,37 @@ class EditTab(QWidget):
         self.rejected_mode_combo.addItem("Tout", userData="all")
         self.rejected_mode_combo.addItem("Rejetées", userData="rejected")
         self.rejected_mode_combo.setFixedWidth(110)
-        self.rejected_mode_combo.currentIndexChanged.connect(self._load_assets)
+        self.rejected_mode_combo.currentIndexChanged.connect(self._on_filter_changed)
         filter_box.addWidget(self.rejected_mode_combo)
 
-        self.min_rating_filter_combo = QComboBox()
-        for r in range(0, 6): self.min_rating_filter_combo.addItem(f"{r} ★", userData=r)
-        self.min_rating_filter_combo.setFixedWidth(65)
-        self.min_rating_filter_combo.currentIndexChanged.connect(self._load_assets)
-        filter_box.addWidget(self.min_rating_filter_combo)
+        self._edit_min_rating: int = 0
+        self._edit_star_lbl = QLabel("≥")
+        self._edit_star_lbl.setStyleSheet("font-size: 11px; color: #888; padding: 0 2px;")
+        filter_box.addWidget(self._edit_star_lbl)
+        self._edit_star_btns: list[QToolButton] = []
+        for _i in range(1, 6):
+            _sb = QToolButton()
+            _sb.setFixedSize(24, 24)
+            _sb.setIcon(_star_icon(False))
+            _sb.setIconSize(QSize(16, 16))
+            _sb.setStyleSheet("QToolButton { border: none; background: transparent; padding: 0; }")
+            _sb.setCursor(Qt.CursorShape.PointingHandCursor)
+            _sb.clicked.connect(lambda _, n=_i: self._set_edit_rating_filter(n))
+            filter_box.addWidget(_sb)
+            self._edit_star_btns.append(_sb)
         toolbar_layout.addLayout(filter_box)
 
         toolbar_layout.addSpacing(24)
         v_sep = QFrame(); v_sep.setFrameShape(QFrame.Shape.VLine); v_sep.setStyleSheet("background: #333; max-width: 1px;"); toolbar_layout.addWidget(v_sep)
         toolbar_layout.addSpacing(24)
 
-        # Tools Section
-        tools_box = QHBoxLayout(); tools_box.setSpacing(12)
-        self.solo_mode_btn = _new_button("Masquer Collection (F)")
-        self.solo_mode_btn.setCheckable(True)
-        self.solo_mode_btn.toggled.connect(self._toggle_solo_mode)
-        tools_box.addWidget(self.solo_mode_btn)
-        toolbar_layout.addLayout(tools_box)
-
         toolbar_layout.addStretch(1)
-        
+
         # Shortcuts hint
-        self.hud_hint = QLabel("F = Collection | B = Avant/Après")
+        self.hud_hint = QLabel("B = Avant/Après")
         toolbar_layout.addWidget(self.hud_hint)
 
         self.panel_focus_label = QLabel() # Stub for compatibility
-        self._solo_hidden_widgets = [
-            vue_lbl, self.rejected_mode_combo, self.min_rating_filter_combo, v_sep
-        ]
 
         toolbar_card.content_layout.addLayout(toolbar_layout)
         layout.addWidget(toolbar_card)
@@ -3579,8 +4775,8 @@ class EditTab(QWidget):
         body = QSplitter(Qt.Orientation.Horizontal)
         self.body_splitter = body
 
-        # ── 2. Asset Collection (Left) ──
-        collection_card = BentoCard("Collection")
+        # ── 2. Asset List (Left) ──
+        collection_card = BentoCard("Assets")
         self.list_panel = collection_card
         collection_layout = QVBoxLayout()
         collection_layout.setContentsMargins(0, 0, 0, 0)
@@ -3588,6 +4784,9 @@ class EditTab(QWidget):
         self.asset_cards_area = QScrollArea()
         self.asset_cards_area.setWidgetResizable(True)
         self.asset_cards_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.asset_cards_area.setProperty("minimalScroll", "true")
+        self.asset_cards_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.asset_cards_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.asset_cards_content = QWidget()
         self.asset_cards_layout = QVBoxLayout(self.asset_cards_content)
         self.asset_cards_layout.setContentsMargins(0, 0, 0, 0)
@@ -3611,7 +4810,7 @@ class EditTab(QWidget):
         preview_grid = QGridLayout()
         preview_grid.setContentsMargins(0, 0, 0, 0)
         
-        self.preview_label = QLabel("Chargement...")
+        self.preview_label = CropPreviewLabel("Chargement...")
         self.preview_label.setObjectName("PreviewLabel")
         self.preview_label.setMinimumHeight(420)
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -3628,8 +4827,10 @@ class EditTab(QWidget):
             font-weight: bold;
         """)
         
+        self.crop_grid_overlay = CropGridOverlay()
         preview_grid.addWidget(self.preview_label, 0, 0)
         preview_grid.addWidget(self.before_after_badge, 0, 0, Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        preview_grid.addWidget(self.crop_grid_overlay, 0, 0)
         
         info_bar = QHBoxLayout(); info_bar.setContentsMargins(12, 0, 12, 0)
         self.asset_info_label = QLabel("Sélection: -")
@@ -3661,7 +4862,7 @@ class EditTab(QWidget):
 
         # Exposition
         self.light_box = BentoCard("Exposition")
-        l_layout = QVBoxLayout()
+        l_layout = QVBoxLayout(); l_layout.setSpacing(4); l_layout.setContentsMargins(0, 0, 0, 0)
         self.exposure_slider = QSlider(Qt.Orientation.Horizontal); self.exposure_slider.setRange(-500, 500)
         self.exposure_value_label = QLabel("+0.00")
         self.contrast_slider = QSlider(Qt.Orientation.Horizontal); self.contrast_slider.setRange(-100, 100)
@@ -3673,7 +4874,7 @@ class EditTab(QWidget):
 
         # Balance
         self.color_box = BentoCard("Couleur")
-        c_layout = QVBoxLayout()
+        c_layout = QVBoxLayout(); c_layout.setSpacing(4); c_layout.setContentsMargins(0, 0, 0, 0)
         self.wb_temp_slider = QSlider(Qt.Orientation.Horizontal); self.wb_temp_slider.setRange(2000, 12000)
         self.wb_temp_value_label = QLabel("5500K")
         self.wb_tint_slider = QSlider(Qt.Orientation.Horizontal); self.wb_tint_slider.setRange(-100, 100)
@@ -3685,7 +4886,7 @@ class EditTab(QWidget):
 
         # Advanced Tools (Collapsible area inside dock)
         self.pro_tools_panel = BentoCard("Outils Avancés")
-        pro_layout = QVBoxLayout(); pro_layout.setSpacing(10)
+        pro_layout = QVBoxLayout(); pro_layout.setSpacing(4); pro_layout.setContentsMargins(0, 0, 0, 0)
         self.highlights_slider = QSlider(Qt.Orientation.Horizontal); self.highlights_slider.setRange(-100, 100); self.highlights_value_label = QLabel("0")
         self.shadows_slider = QSlider(Qt.Orientation.Horizontal); self.shadows_slider.setRange(-100, 100); self.shadows_value_label = QLabel("0")
         self.vibrance_slider = QSlider(Qt.Orientation.Horizontal); self.vibrance_slider.setRange(-100, 100); self.vibrance_value_label = QLabel("0")
@@ -3700,9 +4901,9 @@ class EditTab(QWidget):
         self.pro_tools_panel.setVisible(False)
         dock_v.addWidget(self.pro_tools_panel)
 
-        # Geometry
-        self.geometry_box = BentoCard("Géométrie")
-        g_layout = QVBoxLayout()
+        # Recadrage
+        self.geometry_box = BentoCard("Recadrage")
+        g_layout = QVBoxLayout(); g_layout.setSpacing(4); g_layout.setContentsMargins(0, 0, 0, 0)
         self.crop_ratio_combo = QComboBox(); self.crop_ratio_combo.addItems(["original", "1:1", "4:5", "3:2", "16:9"])
         self.straighten_slider = QSlider(Qt.Orientation.Horizontal); self.straighten_slider.setRange(-450, 450); self.straighten_value_label = QLabel("+0.0 deg")
         g_layout.addLayout(self._build_combo_row("Format", self.crop_ratio_combo))
@@ -3749,7 +4950,7 @@ class EditTab(QWidget):
         # Status Bar Bottom
         self.status_bar_area = QWidget()
         s_layout = QHBoxLayout(self.status_bar_area)
-        self.sync_progress = QProgressBar(); self.sync_progress.setFixedHeight(4); self.sync_progress.setTextVisible(False)
+        self.sync_progress = AnimatedProgressBar(); self.sync_progress.setFixedHeight(4); self.sync_progress.setTextVisible(False)
         self.sync_cancel_btn = _new_button("Quitter", primary=False)
         self.sync_cancel_btn.setFixedSize(60, 24)
         self.sync_cancel_btn.clicked.connect(self._cancel_sync)
@@ -3766,6 +4967,25 @@ class EditTab(QWidget):
         self.action_scroll = QWidget(); self.before_after_btn = QWidget()
 
         self._connect_form_signals()
+
+        # ── Loading overlay — floats above all content, positioned by resizeEvent ──
+        self._busy_overlay = QFrame(self)
+        self._busy_overlay.setObjectName("BusyOverlay")
+        self._busy_overlay.setStyleSheet(
+            "QFrame#BusyOverlay { background: rgba(0, 0, 0, 160); border-radius: 0px; }"
+        )
+        _ov_vbox = QVBoxLayout(self._busy_overlay)
+        _ov_vbox.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _ov_vbox.setSpacing(16)
+        self._busy_spinner = _SpinnerWidget(size=48, color=QColor(220, 220, 220))
+        _ov_lbl = QLabel("Chargement des assets…")
+        _ov_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _ov_lbl.setStyleSheet("color: #CCCCCC; font-size: 13px; background: transparent;")
+        _ov_vbox.addWidget(self._busy_spinner, alignment=Qt.AlignmentFlag.AlignHCenter)
+        _ov_vbox.addWidget(_ov_lbl)
+        self._busy_overlay.setGeometry(self.rect())
+        self._busy_overlay.setVisible(False)
+
         self._build_shortcuts()
         self._apply_settings_to_form(dict(DEFAULT_EDIT_SETTINGS))
         self._apply_before_after_state()
@@ -3780,7 +5000,68 @@ class EditTab(QWidget):
             slider.valueChanged.connect(self._on_param_changed)
         
         self.crop_ratio_combo.currentIndexChanged.connect(self._on_param_changed)
+        self.crop_ratio_combo.currentIndexChanged.connect(self._on_crop_ratio_changed)
+        self.preview_label.crop_panned.connect(self._on_crop_panned)
+
+        self.straighten_slider.sliderPressed.connect(self._on_straighten_pressed)
+        self.straighten_slider.sliderReleased.connect(self._on_straighten_released)
+
+        self._crop_grid_hide_timer = QTimer(self)
+        self._crop_grid_hide_timer.setSingleShot(True)
+        self._crop_grid_hide_timer.setInterval(800)
+        self._crop_grid_hide_timer.timeout.connect(self._hide_crop_grid)
+
         self._update_edit_value_labels()
+
+    def _on_straighten_pressed(self) -> None:
+        self._crop_grid_hide_timer.stop()
+        self.crop_grid_overlay._show_diagonals = True
+        self.crop_grid_overlay.setVisible(True)
+        self.crop_grid_overlay.update()
+
+    def _on_straighten_released(self) -> None:
+        self.crop_grid_overlay._show_diagonals = False
+        self.crop_grid_overlay.update()
+        self._crop_grid_hide_timer.start()
+
+    def _show_crop_grid_briefly(self) -> None:
+        self._crop_grid_hide_timer.stop()
+        self.crop_grid_overlay._show_diagonals = False
+        self.crop_grid_overlay.setVisible(True)
+        self.crop_grid_overlay.update()
+        self._crop_grid_hide_timer.start()
+
+    def _hide_crop_grid(self) -> None:
+        self.crop_grid_overlay.setVisible(False)
+
+    def _on_crop_ratio_changed(self) -> None:
+        is_active = self.crop_ratio_combo.currentText() != "original"
+        self.preview_label.set_crop_active(is_active)
+        if not is_active:
+            self._crop_pan_x = 0
+            self._crop_pan_y = 0
+        else:
+            self._crop_pan_x = 0
+            self._crop_pan_y = 0
+        self._show_crop_grid_briefly()
+
+    def _on_crop_panned(self, dx_px: int, dy_px: int) -> None:
+        if self._base_image is None:
+            return
+        # Convert preview-pixel delta to original-image-pixel delta
+        if self._last_rendered_img_size is not None:
+            img_w, img_h = self._last_rendered_img_size
+            lw = max(1, self.preview_label.width())
+            lh = max(1, self.preview_label.height())
+            scale = min(lw / img_w, lh / img_h)
+            self._crop_pan_x -= int(dx_px / scale)
+            self._crop_pan_y -= int(dy_px / scale)
+        else:
+            self._crop_pan_x -= dx_px * 4
+            self._crop_pan_y -= dy_px * 4
+        self._show_crop_grid_briefly()
+        self._render_timer.start(16)
+        self._schedule_autosave()
 
     def _on_param_changed(self, *_args) -> None:
         if self._form_loading:
@@ -3792,14 +5073,22 @@ class EditTab(QWidget):
     def _build_slider_row(self, label_text: str, slider: QSlider, value_label: QLabel) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
+        row.setSpacing(8)
         field_label = QLabel(label_text)
         field_label.setObjectName("EditFieldLabel")
-        field_label.setFixedWidth(70)
+        field_label.setFixedWidth(54)
+        field_label.setStyleSheet("font-size: 11px;")
         value_label.setObjectName("EditFieldValue")
         value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        value_label.setFixedWidth(65)
-        slider.setMinimumHeight(24)
+        value_label.setFixedWidth(52)
+        value_label.setStyleSheet("font-size: 11px;")
+        slider.setFixedHeight(18)
+        slider.setStyleSheet("""
+            QSlider::groove:horizontal { height: 3px; background: #555; border-radius: 1px; }
+            QSlider::handle:horizontal { width: 10px; height: 10px; margin: -4px 0;
+                background: #DDD; border-radius: 5px; }
+            QSlider::sub-page:horizontal { background: #888; border-radius: 1px; }
+        """)
         row.addWidget(field_label)
         row.addWidget(slider, 1)
         row.addWidget(value_label)
@@ -3808,10 +5097,13 @@ class EditTab(QWidget):
     def _build_combo_row(self, label_text: str, combo: QComboBox) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(12)
+        row.setSpacing(8)
         field_label = QLabel(label_text)
         field_label.setObjectName("EditFieldLabel")
-        field_label.setFixedWidth(82)
+        field_label.setFixedWidth(54)
+        field_label.setStyleSheet("font-size: 11px;")
+        combo.setFixedHeight(22)
+        combo.setStyleSheet("font-size: 11px;")
         row.addWidget(field_label)
         row.addWidget(combo, 1)
         return row
@@ -3835,20 +5127,77 @@ class EditTab(QWidget):
         sync_shortcut.activated.connect(self._start_sync_filtered)
         self._shortcut_refs.append(sync_shortcut)
 
-        solo_shortcut = QShortcut(QKeySequence("F"), self)
-        solo_shortcut.activated.connect(lambda: self.solo_mode_btn.setChecked(not self.solo_mode_btn.isChecked()))
-        self._shortcut_refs.append(solo_shortcut)
-        
         ba_shortcut = QShortcut(QKeySequence("B"), self)
         ba_shortcut.activated.connect(lambda: self._toggle_before_after(not self._before_mode))
         self._shortcut_refs.append(ba_shortcut)
 
     def refresh_data(self) -> None:
-        self._load_assets()
+        self._refresh_collection_combo()
+        self._refresh_filter_combo()
+        self._show_busy()
+        QTimer.singleShot(0, self._load_assets)
+
+    def _show_busy(self) -> None:
+        self._busy_overlay.setGeometry(self.rect())
+        self._busy_overlay.raise_()
+        self._busy_overlay.setVisible(True)
+        self._busy_spinner.start()
+
+    def _hide_busy(self) -> None:
+        self._busy_spinner.stop()
+        self._busy_overlay.setVisible(False)
 
     def set_selected_project(self, project_id: int) -> None:
         self._selected_project_id = project_id
-        self._load_assets()
+        self._refresh_collection_combo()
+        self._refresh_filter_combo()
+        if not self.isVisible():
+            self._load_pending = True
+            return
+        self._load_pending = False
+        self._show_busy()
+        QTimer.singleShot(0, self._load_assets)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._load_pending:
+            self._load_pending = False
+            self._show_busy()
+            QTimer.singleShot(0, self._load_assets)
+
+    def _on_filter_changed(self) -> None:
+        self._show_busy()
+        QTimer.singleShot(0, self._load_assets)
+
+    def _refresh_collection_combo(self) -> None:
+        self._refresh_filter_combo()
+
+    def _refresh_filter_combo(self) -> None:
+        prev = self.rejected_mode_combo.currentData()
+        self.rejected_mode_combo.blockSignals(True)
+        try:
+            self.rejected_mode_combo.clear()
+            self.rejected_mode_combo.addItem("A garder", userData="kept")
+            self.rejected_mode_combo.addItem("Tout", userData="all")
+            self.rejected_mode_combo.addItem("Rejetées", userData="rejected")
+            if self._selected_project_id is not None:
+                try:
+                    cols = self.collection_service.list_collections(project_id=self._selected_project_id)
+                    for col, _count in cols:
+                        self.rejected_mode_combo.addItem(col.name, userData=f"col:{col.id}")
+                except Exception:
+                    pass
+                try:
+                    labels = self.culling_service.list_distinct_color_labels(self._selected_project_id)
+                    for lbl in labels:
+                        self.rejected_mode_combo.addItem(lbl, userData=f"cat:{lbl}")
+                except Exception:
+                    pass
+            idx = self.rejected_mode_combo.findData(prev)
+            if idx >= 0:
+                self.rejected_mode_combo.setCurrentIndex(idx)
+        finally:
+            self.rejected_mode_combo.blockSignals(False)
 
     def _toggle_advanced_panel(self, opened: bool) -> None:
         self.pro_metadata_panel.setVisible(opened)
@@ -3857,17 +5206,7 @@ class EditTab(QWidget):
         self.pro_tools_panel.setVisible(bool(opened))
 
     def _toggle_solo_mode(self, enabled: bool) -> None:
-        self._solo_mode_enabled = bool(enabled)
-        for widget in self._solo_hidden_widgets:
-            widget.setVisible(not self._solo_mode_enabled)
-        self.list_panel.setVisible(not self._solo_mode_enabled)
-        
-        if self._solo_mode_enabled:
-            self.preview_label.setMinimumHeight(440)
-        else:
-            self.preview_label.setMinimumHeight(380)
-            
-        self.reset_layout_after_shell_resize()
+        pass  # Button removed — kept for API compatibility
 
     def _toggle_before_after(self, enabled: bool) -> None:
         self._before_mode = bool(enabled)
@@ -3890,9 +5229,17 @@ class EditTab(QWidget):
             return
         self._autosave_timer.start(self._autosave_delay)
 
+    def _set_edit_rating_filter(self, n: int) -> None:
+        self._edit_min_rating = 0 if self._edit_min_rating == n else n
+        for i, btn in enumerate(self._edit_star_btns, 1):
+            btn.setIcon(_star_icon(i <= self._edit_min_rating))
+        self._show_busy()
+        QTimer.singleShot(0, self._load_assets)
+
     def _load_assets(self) -> None:
         project_id = self._selected_project_id
         if project_id is None:
+            self._hide_busy()
             self._clear_asset_cards()
             self._set_selected_asset(None)
             self.assets_by_id = {}
@@ -3902,13 +5249,31 @@ class EditTab(QWidget):
             self.asset_info_label.setText("Selection: -")
             return
 
-        rejected_mode = self.rejected_mode_combo.currentData()
-        min_rating = int(self.min_rating_filter_combo.currentData() or 0)
+        raw_mode = self.rejected_mode_combo.currentData() or "kept"
+        col_filter_id: int | None = None
+        color_label_filter: str | None = None
+        if isinstance(raw_mode, str) and raw_mode.startswith("col:"):
+            rejected_mode = "all"
+            col_filter_id = int(raw_mode[4:])
+        elif isinstance(raw_mode, str) and raw_mode.startswith("cat:"):
+            rejected_mode = "all"
+            color_label_filter = raw_mode[4:]
+        else:
+            rejected_mode = raw_mode
+        min_rating = self._edit_min_rating
         assets = self.edit_service.list_assets(
             project_id=int(project_id),
             rejected_mode=str(rejected_mode),
             min_rating=min_rating,
         )
+        if col_filter_id is not None:
+            try:
+                col_ids = set(self.collection_service.get_asset_ids(collection_id=col_filter_id))
+                assets = [a for a in assets if int(a.id) in col_ids]
+            except Exception:
+                pass
+        if color_label_filter is not None:
+            assets = [a for a in assets if a.color_label == color_label_filter]
 
         current_asset_id = self.selected_asset_id
         self.assets_by_id = {int(asset.id): asset for asset in assets}
@@ -3922,27 +5287,75 @@ class EditTab(QWidget):
 
     def _clear_asset_cards(self) -> None:
         self.asset_card_widgets = {}
+        # Stop all deferred work BEFORE deleteLater() so no timer callback can
+        # fire and access a label / card widget that is being destroyed.
+        self._chunk_timer.stop()
+        self._edit_thumb_timer.stop()
+        self._pending_thumb_labels.clear()
+        self._pending_assets = []
         while self.asset_cards_layout.count():
             item = self.asset_cards_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
 
+    _FIRST_CHUNK = 15
+    _CHUNK_SIZE = 25
+
     def _render_asset_cards(self, assets: list) -> None:
+        self._chunk_timer.stop()
         self._clear_asset_cards()
         if not assets:
             empty = QLabel("Aucun asset pour ces filtres.")
             empty.setObjectName("CardMuted")
             self.asset_cards_layout.addWidget(empty)
             self.asset_cards_layout.addStretch(1)
+            self._hide_busy()
             return
+        first = assets[:self._FIRST_CHUNK]
+        self._pending_assets = list(assets[self._FIRST_CHUNK:])
+        self.asset_cards_content.setUpdatesEnabled(False)
+        try:
+            for asset in first:
+                is_selected = (
+                    self.selected_asset_id is not None
+                    and int(asset.id) == int(self.selected_asset_id)
+                )
+                card = self._build_asset_card(asset, is_selected=is_selected)
+                self.asset_card_widgets[int(asset.id)] = card
+                self.asset_cards_layout.addWidget(card)
+            if not self._pending_assets:
+                self.asset_cards_layout.addStretch(1)
+        finally:
+            self.asset_cards_content.setUpdatesEnabled(True)
+        self.asset_cards_content.updateGeometry()
+        self._hide_busy()
+        if self._pending_assets:
+            self._chunk_timer.start()
 
-        for asset in assets:
-            is_selected = self.selected_asset_id is not None and int(asset.id) == int(self.selected_asset_id)
-            card = self._build_asset_card(asset, is_selected=is_selected)
-            self.asset_card_widgets[int(asset.id)] = card
-            self.asset_cards_layout.addWidget(card)
-        self.asset_cards_layout.addStretch(1)
+    def _render_next_chunk(self) -> None:
+        if not self._pending_assets:
+            self.asset_cards_layout.addStretch(1)
+            self._chunk_timer.stop()
+            return
+        chunk = self._pending_assets[:self._CHUNK_SIZE]
+        self._pending_assets = self._pending_assets[self._CHUNK_SIZE:]
+        self.asset_cards_content.setUpdatesEnabled(False)
+        try:
+            for asset in chunk:
+                is_selected = (
+                    self.selected_asset_id is not None
+                    and int(asset.id) == int(self.selected_asset_id)
+                )
+                card = self._build_asset_card(asset, is_selected=is_selected)
+                self.asset_card_widgets[int(asset.id)] = card
+                self.asset_cards_layout.addWidget(card)
+            if not self._pending_assets:
+                self.asset_cards_layout.addStretch(1)
+                self._chunk_timer.stop()
+        finally:
+            self.asset_cards_content.setUpdatesEnabled(True)
+        self.asset_cards_content.updateGeometry()
 
     def _build_asset_card(self, asset, is_selected: bool) -> QWidget:
         card = QFrame()
@@ -3961,13 +5374,21 @@ class EditTab(QWidget):
         thumb_label.setFixedSize(82, 54)
         thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         src_path = Path(str(asset.src_path)) if asset.src_path else None
-        thumb = self._load_asset_thumb(src_path, 82, 54)
-        if thumb.isNull():
-            fallback = QPixmap(82, 54)
-            fallback.fill(QColor("#2B2B2B"))
-            thumb_label.setPixmap(fallback)
-        else:
+        thumb = self._load_asset_thumb_cached_only(src_path, 82, 54)
+        if thumb is not None and not thumb.isNull():
             thumb_label.setPixmap(thumb)
+        else:
+            placeholder = QPixmap(82, 54)
+            placeholder.fill(QColor("#2B2B2B"))
+            thumb_label.setPixmap(placeholder)
+            if src_path is not None and self._disk_cache is not None:
+                key = f"{src_path}|82x54"
+                self._pending_thumb_labels[key] = thumb_label
+                self._thumb_executor.submit(
+                    self._disk_cache.get_or_create_cached_path,
+                    src_path, kind="thumb", width=82, height=54,
+                )
+                self._edit_thumb_timer.start()
         row.addWidget(thumb_label, 0)
 
         meta_col = QVBoxLayout()
@@ -4016,12 +5437,64 @@ class EditTab(QWidget):
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation,
             )
+        if key in self._thumb_cache:
+            self._thumb_cache.move_to_end(key)
         self._thumb_cache[key] = thumb
-        self._thumb_cache_order.append(key)
-        while len(self._thumb_cache_order) > 600:
-            stale = self._thumb_cache_order.pop(0)
-            self._thumb_cache.pop(stale, None)
+        while len(self._thumb_cache) > 600:
+            self._thumb_cache.popitem(last=False)
         return thumb
+
+    def _load_asset_thumb_cached_only(self, file_path: Path | None, width: int, height: int) -> QPixmap | None:
+        """Return thumbnail only from memory or disk cache — never blocks on full image I/O."""
+        if file_path is None:
+            return None
+        key = f"{file_path}|{width}x{height}"
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            self._thumb_cache.move_to_end(key)
+            return cached
+        if self._disk_cache is not None:
+            cached_path = self._disk_cache.get_existing_cached_path(
+                file_path, kind="thumb", width=width, height=height
+            )
+            if cached_path is not None and cached_path.exists():
+                pixmap = QPixmap(str(cached_path))
+                if not pixmap.isNull():
+                    self._thumb_cache[key] = pixmap
+                    while len(self._thumb_cache) > 600:
+                        self._thumb_cache.popitem(last=False)
+                    return pixmap
+        return None
+
+    def _fill_pending_edit_thumbs(self) -> None:
+        """Timer callback — update card thumb labels whose disk-cached thumb is now ready."""
+        if not self._pending_thumb_labels:
+            self._edit_thumb_timer.stop()
+            return
+        still_pending: dict[str, QLabel] = {}
+        for key, label in list(self._pending_thumb_labels.items()):
+            # key format: "{src_path}|{w}x{h}"
+            parts = key.rsplit("|", 1)
+            if len(parts) != 2:
+                continue
+            src_path = Path(parts[0])
+            try:
+                w, h = (int(v) for v in parts[1].split("x"))
+            except ValueError:
+                continue
+            thumb = self._load_asset_thumb_cached_only(src_path, w, h)
+            if thumb is not None and not thumb.isNull():
+                try:
+                    label.setPixmap(thumb)
+                except RuntimeError:
+                    # C++ widget was deleted (via deleteLater) before the timer fired.
+                    pass
+            else:
+                still_pending[key] = label
+        self._pending_thumb_labels = still_pending
+        if not still_pending:
+            self._edit_thumb_timer.stop()
+
     def _on_asset_card_selected(self, asset_id: int) -> None:
         if self._autosave_timer.isActive():
             self._autosave_timer.stop()
@@ -4099,6 +5572,9 @@ class EditTab(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        if self._busy_overlay is not None:
+            self._busy_overlay.setGeometry(self.rect())
+            self._busy_overlay.raise_()
         if self._base_image:
             self._render_timer.start(0)
         else:
@@ -4108,19 +5584,12 @@ class EditTab(QWidget):
         splitter = getattr(self, "body_splitter", None)
         if splitter is None:
             return
-            
+
         total = max(1, int(splitter.width()))
         right_w = 350
-        
-        if self._solo_mode_enabled:
-            # Hide left (collection), keep center and right (tools)
-            center_w = max(400, total - right_w)
-            splitter.setSizes([0, center_w, right_w])
-        else:
-            # Show all three modules
-            left_w = 280
-            center_w = max(400, total - (left_w + right_w))
-            splitter.setSizes([left_w, center_w, right_w])
+        left_w = 280
+        center_w = max(400, total - (left_w + right_w))
+        splitter.setSizes([left_w, center_w, right_w])
 
     def _apply_edit_preview(self) -> None:
         if not PIL_AVAILABLE or self._base_image is None:
@@ -4136,10 +5605,30 @@ class EditTab(QWidget):
         # Start from base
         img = self._base_image.copy()
 
-        # 1. Geometry (Rotate) - Apply first before heavy pixel work
+        # 1. Rotation — stays within original frame (no new pixels)
         angle = float(settings.get("straighten", 0.0))
         if abs(angle) > 0.01:
-            img = img.rotate(-angle, expand=True, resample=Image.Resampling.BICUBIC)
+            img = img.rotate(-angle, expand=False, resample=Image.Resampling.BICUBIC)
+
+        # 1b. Crop ratio — center-crop to target aspect ratio, with pan offset
+        _RATIOS = {"1:1": 1.0, "4:5": 4 / 5, "3:2": 3 / 2, "16:9": 16 / 9}
+        crop_ratio_key = str(settings.get("crop_ratio", "original"))
+        if crop_ratio_key in _RATIOS:
+            target_ar = _RATIOS[crop_ratio_key]
+            iw, ih = img.size
+            current_ar = iw / ih
+            if current_ar > target_ar:
+                # Image too wide — crop sides
+                new_w = int(ih * target_ar)
+                margin = iw - new_w
+                x0 = max(0, min(margin, margin // 2 + self._crop_pan_x))
+                img = img.crop((x0, 0, x0 + new_w, ih))
+            elif current_ar < target_ar:
+                # Image too tall — crop top/bottom
+                new_h = int(iw / target_ar)
+                margin = ih - new_h
+                y0 = max(0, min(margin, margin // 2 + self._crop_pan_y))
+                img = img.crop((0, y0, iw, y0 + new_h))
 
         # 2. Exposure (Approximate using Brightness)
         expo = float(settings.get("exposure", 0.0))
@@ -4193,7 +5682,9 @@ class EditTab(QWidget):
 
     def _display_pil_image(self, img: Image.Image) -> None:
         if img is None: return
-        
+
+        self._last_rendered_img_size = img.size
+
         # Convert PIL to QPixmap
         qimg = ImageQt(img)
         pixmap = QPixmap.fromImage(qimg)
@@ -4217,6 +5708,9 @@ class EditTab(QWidget):
             crop_ratio = str(payload.get("crop_ratio", "original"))
             crop_idx = self.crop_ratio_combo.findText(crop_ratio)
             self.crop_ratio_combo.setCurrentIndex(max(0, crop_idx))
+            self._crop_pan_x = int(payload.get("crop_pan_x", 0))
+            self._crop_pan_y = int(payload.get("crop_pan_y", 0))
+            self.preview_label.set_crop_active(crop_ratio != "original")
             self.straighten_slider.setValue(int(round(float(payload.get("straighten", 0.0)) * 10.0)))
             self.contrast_slider.setValue(int(payload.get("contrast", 0)))
             self.highlights_slider.setValue(int(payload.get("highlights", 0)))
@@ -4234,6 +5728,8 @@ class EditTab(QWidget):
             "wb_temp": int(self.wb_temp_slider.value()),
             "wb_tint": int(self.wb_tint_slider.value()),
             "crop_ratio": str(self.crop_ratio_combo.currentText()),
+            "crop_pan_x": self._crop_pan_x,
+            "crop_pan_y": self._crop_pan_y,
             "straighten": float(self.straighten_slider.value()) / 10.0,
             "contrast": int(self.contrast_slider.value()),
             "highlights": int(self.highlights_slider.value()),
@@ -4328,11 +5824,13 @@ class EditTab(QWidget):
             QMessageBox.warning(self, "Validation", "Selectionne un projet et un asset source.")
             return
         try:
+            _rm = self.rejected_mode_combo.currentData() or "kept"
+            _rm = "all" if (isinstance(_rm, str) and _rm.startswith("col:")) else _rm
             result = self.metadata_service.sync_iptc_to_filtered(
                 project_id=int(project_id),
                 source_asset_id=int(asset_id),
-                rejected_mode=str(self.rejected_mode_combo.currentData() or "kept"),
-                min_rating=int(self.min_rating_filter_combo.currentData() or 0),
+                rejected_mode=str(_rm),
+                min_rating=self._cull_min_rating,
             )
             self.on_job_event(f"[Metadata] Sync {result.status} | maj={result.updated}/{result.total}")
             QMessageBox.information(
@@ -4410,12 +5908,14 @@ class EditTab(QWidget):
         self.on_operation_started()
         self.on_job_event(f"[Edit] Sync filtres lance depuis asset {asset_id}.")
 
+        _rm_sync = self.rejected_mode_combo.currentData() or "all"
+        _rm_sync = "all" if (isinstance(_rm_sync, str) and _rm_sync.startswith("col:")) else _rm_sync
         worker = JobWorker(
             self.edit_service.sync_edit_settings_to_filtered,
             project_id=int(project_id),
             source_asset_id=int(asset_id),
-            rejected_mode=str(self.rejected_mode_combo.currentData()),
-            min_rating=int(self.min_rating_filter_combo.currentData() or 0),
+            rejected_mode=str(_rm_sync),
+            min_rating=self._cull_min_rating,
         )
         thread = QThread(self)
         worker.moveToThread(thread)
@@ -4644,7 +6144,7 @@ class ExportTab(QWidget):
         progress_layout.setContentsMargins(10, 0, 10, 10)
         progress_layout.setSpacing(4)
 
-        self.progress_bar = QProgressBar()
+        self.progress_bar = AnimatedProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(100)
         self.progress_bar.setValue(0)
@@ -5761,14 +7261,16 @@ class PresetTab(QWidget):
         self.naming_pattern_edit.setPlaceholderText("{project}_{date}_{seq:04d}")
         self.naming_pattern_edit.setToolTip(
             "Tags disponibles :\n"
-            "  {project}  — Nom du projet\n"
+            "  {project}    — Nom du projet\n"
+            "  {client}     — Nom du client (si défini)\n"
+            "  {preset}     — Nom du preset (si défini)\n"
             "  {date}       — Date de shooting (YYYYMMDD)\n"
-            "  {seq:04d}  — Numéro séquentiel (ex: 0001)\n"
+            "  {seq:04d}    — Numéro séquentiel (ex: 0001)\n"
             "  {orig}       — Nom original du fichier"
         )
         naming_group.addWidget(naming_lbl)
         naming_group.addWidget(self.naming_pattern_edit)
-        naming_hint = QLabel("Tags : {project}  {date}  {seq:04d}  {orig}")
+        naming_hint = QLabel("Tags : {project}  {client}  {preset}  {date}  {seq:04d}  {orig}")
         naming_hint.setStyleSheet("color: #777; font-size: 9px; font-family: Consolas, monospace; background: transparent;")
         naming_group.addWidget(naming_hint)
         proc_layout.addLayout(naming_group)
@@ -6289,8 +7791,62 @@ class SettingsTab(QWidget):
         mid_row.addWidget(studio_card, 1)
         
         layout.addLayout(mid_row)
+
+        # ── À propos ──
+        from photohub import __version__ as _APP_VERSION
+        about_card = BentoCard("À propos")
+        about_v = QVBoxLayout()
+        about_v.setSpacing(10)
+
+        title_row = QHBoxLayout()
+        _app_lbl = QLabel("PhotoHub")
+        _app_lbl.setStyleSheet("font-size: 18px; font-weight: bold;")
+        _ver_badge = QLabel(f"v{_APP_VERSION}")
+        _ver_badge.setStyleSheet(
+            "background: #2563EB; color: white; border-radius: 4px;"
+            " padding: 2px 8px; font-size: 11px; font-weight: 600;"
+        )
+        title_row.addWidget(_app_lbl)
+        title_row.addSpacing(8)
+        title_row.addWidget(_ver_badge)
+        title_row.addStretch(1)
+        about_v.addLayout(title_row)
+
+        _desc = QLabel("Outil de workflow photo pour photographes professionnels.")
+        _desc.setStyleSheet("color: #888; font-size: 12px;")
+        about_v.addWidget(_desc)
+
+        _sep1 = QFrame(); _sep1.setFrameShape(QFrame.Shape.HLine)
+        _sep1.setStyleSheet("background: #333; max-height: 1px;")
+        about_v.addWidget(_sep1)
+
+        _feat_lbl = QLabel("Fonctionnalités")
+        _feat_lbl.setStyleSheet("font-weight: 600; font-size: 12px;")
+        about_v.addWidget(_feat_lbl)
+        for _f in [
+            "Ingestion & organisation par projet",
+            "Tri rapide (culling tinder-style) avec collections",
+            "Retouche non-destructive (exposition, couleur, géométrie)",
+            "Renommage en lot avec modèles personnalisables",
+            "Export avec presets & filigrane",
+        ]:
+            _fl = QLabel(f"• {_f}")
+            _fl.setStyleSheet("font-size: 11px; color: #AAA; padding-left: 8px;")
+            about_v.addWidget(_fl)
+
+        _sep2 = QFrame(); _sep2.setFrameShape(QFrame.Shape.HLine)
+        _sep2.setStyleSheet("background: #333; max-height: 1px;")
+        about_v.addWidget(_sep2)
+
+        _stack = QLabel("Python 3.10+  ·  PySide6 (Qt6)  ·  SQLAlchemy / SQLite  ·  Pillow")
+        _stack.setStyleSheet("font-size: 11px; color: #666;")
+        about_v.addWidget(_stack)
+
+        about_card.content_layout.addLayout(about_v)
+        layout.addWidget(about_card)
+
         layout.addStretch(1)
-        
+
         scroll.setWidget(container)
         main_layout.addWidget(scroll)
 
@@ -6353,6 +7909,7 @@ class SettingsTab(QWidget):
                 photographer_name=self.photographer_name_edit.text().strip(),
                 copyright_notice=self.copyright_notice_edit.text().strip(),
             )
+            self.dashboard_tab.refresh_data()
             QMessageBox.information(self, "Profil studio", "Profil studio mis a jour.")
         except Exception as exc:
             QMessageBox.critical(self, "Erreur profil studio", str(exc))

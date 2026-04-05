@@ -75,11 +75,6 @@ class CullingServiceTests(unittest.TestCase):
             self.assertEqual(len(updated), 1)
             self.assertEqual(updated[0].rating, 5)
 
-            state = service.toggle_rejected(all_items[0].id)
-            self.assertTrue(state)
-            rejected_after = service.list_assets(project.id, rejected_mode="rejected", min_rating=0)
-            self.assertEqual(len(rejected_after), 2)
-
             engine.dispose()
 
 

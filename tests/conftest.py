@@ -6,6 +6,21 @@ from pathlib import Path
 
 import pytest
 
+try:
+    from PIL import Image as _PilImage
+    _PIL_AVAILABLE = True
+except Exception:
+    _PIL_AVAILABLE = False
+    _PilImage = None
+
+
+def write_test_image(path: Path, width: int = 20, height: int = 20) -> None:
+    """Write a minimal valid JPEG to *path* for use in export pipeline tests."""
+    if _PIL_AVAILABLE:
+        _PilImage.new("RGB", (width, height), color=(128, 128, 128)).save(path, format="JPEG")
+    else:
+        path.write_bytes(b"fake")
+
 from photohub.config import AppPaths
 from photohub.db import Base, create_session_factory, create_sqlite_engine, init_db
 

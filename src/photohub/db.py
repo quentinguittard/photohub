@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 
@@ -12,7 +12,27 @@ class Base(DeclarativeBase):
 
 
 def create_sqlite_engine(db_path: Path):
-    return create_engine(f"sqlite:///{db_path}", future=True)
+    engine = create_engine(
+        f"sqlite:///{db_path}",
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+        cursor = dbapi_conn.cursor()
+        # WAL allows concurrent readers while a writer holds the lock —
+        # critical for not stalling the UI thread when an import is running.
+        cursor.execute("PRAGMA journal_mode=WAL")
+        # NORMAL is safe with WAL and avoids a sync-to-disk on every commit.
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        # 32 MB page cache — reduces I/O for repeated reads of the asset table.
+        cursor.execute("PRAGMA cache_size=-32000")
+        # Keep temp tables in memory instead of on disk.
+        cursor.execute("PRAGMA temp_store=MEMORY")
+        cursor.close()
+
+    return engine
 
 
 def create_session_factory(engine):
@@ -78,6 +98,9 @@ def _backfill_asset_metadata_index(conn) -> None:
     if not rows:
         return
 
+    # Collect all rows that need updating, then flush in a single executemany
+    # instead of issuing one UPDATE per row — dramatically faster on large libraries.
+    updates: list[tuple] = []
     for row in rows:
         row_id = int(row[0])
         metadata_text = row[1]
@@ -105,29 +128,34 @@ def _backfill_asset_metadata_index(conn) -> None:
         author = _to_text(iptc.get("author"))
         copyright_text = _to_text(iptc.get("copyright"))
 
-        conn.exec_driver_sql(
-            """
-            UPDATE assets
-               SET exif_iso = ?,
-                   exif_lens = ?,
-                   exif_camera = ?,
-                   exif_shot_date = ?,
-                   iptc_keywords = ?,
-                   iptc_author = ?,
-                   iptc_copyright = ?
-             WHERE id = ?
-            """,
-            (
-                iso,
-                lens or None,
-                camera or None,
-                shot_date or None,
-                keywords_norm or None,
-                author or None,
-                copyright_text or None,
-                row_id,
-            ),
-        )
+        updates.append((
+            iso,
+            lens or None,
+            camera or None,
+            shot_date or None,
+            keywords_norm or None,
+            author or None,
+            copyright_text or None,
+            row_id,
+        ))
+
+    if not updates:
+        return
+
+    conn.exec_driver_sql(
+        """
+        UPDATE assets
+           SET exif_iso = ?,
+               exif_lens = ?,
+               exif_camera = ?,
+               exif_shot_date = ?,
+               iptc_keywords = ?,
+               iptc_author = ?,
+               iptc_copyright = ?
+         WHERE id = ?
+        """,
+        updates,
+    )
 
 
 def _backfill_project_quality_check(conn) -> None:

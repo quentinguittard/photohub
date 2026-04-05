@@ -93,25 +93,6 @@ class JobQueueService:
             models = list(session.scalars(query.limit(max(1, int(limit)))).all())
             return [self._to_snapshot(model) for model in models]
 
-    def list_job_events(self, job_id: int, limit: int = 200) -> list[tuple[str, str, datetime]]:
-        with self.session_factory() as session:
-            rows = list(
-                session.scalars(
-                    select(JobEvent)
-                    .where(JobEvent.job_id == int(job_id))
-                    .order_by(JobEvent.created_at.asc(), JobEvent.id.asc())
-                    .limit(max(1, int(limit)))
-                ).all()
-            )
-            return [(str(row.level), str(row.message), row.created_at) for row in rows]
-
-    def get_job(self, job_id: int) -> JobSnapshot | None:
-        with self.session_factory() as session:
-            model = session.get(JobQueue, int(job_id))
-            if model is None:
-                return None
-            return self._to_snapshot(model)
-
     def recover_stale_running_jobs(self, stale_after_seconds: int = 90) -> int:
         now = datetime.utcnow()
         stale_before = now - timedelta(seconds=max(5, int(stale_after_seconds)))
@@ -172,16 +153,6 @@ class JobQueueService:
             return self._claim_by_id_atomic(
                 session,
                 job_id=int(candidate_id),
-                worker_id=str(worker_id),
-                now=now,
-            )
-
-    def claim_job(self, *, job_id: int, worker_id: str) -> JobSnapshot | None:
-        now = datetime.utcnow()
-        with self.session_factory() as session:
-            return self._claim_by_id_atomic(
-                session,
-                job_id=int(job_id),
                 worker_id=str(worker_id),
                 now=now,
             )
@@ -364,18 +335,6 @@ class JobQueueService:
         exp = max(0, int(attempts) - 1)
         delay = self.base_backoff_seconds * (2**exp)
         return int(min(self.max_backoff_seconds, delay))
-
-    def _claim_model(self, session, model: JobQueue, *, worker_id: str, now: datetime) -> JobSnapshot:
-        model.status = JOB_STATUS_RUNNING
-        model.locked_by = str(worker_id)
-        model.locked_at = now
-        model.heartbeat_at = now
-        model.attempts = int(model.attempts) + 1
-        model.updated_at = now
-        self._append_event(session, model.id, "info", f"Job claim par {worker_id} (try {model.attempts}).")
-        session.commit()
-        session.refresh(model)
-        return self._to_snapshot(model)
 
     def _claim_by_id_atomic(self, session, *, job_id: int, worker_id: str, now: datetime) -> JobSnapshot | None:
         result = session.execute(

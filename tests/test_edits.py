@@ -94,10 +94,6 @@ class EditServiceTests(unittest.TestCase):
             self.assertEqual(updated["crop_ratio"], "original")
             self.assertEqual(updated["straighten"], -45.0)
 
-            copied = service.copy_edit_settings(source_id, target_id)
-            self.assertEqual(copied["exposure"], 5.0)
-            self.assertEqual(copied["wb_temp"], 2000)
-
             sync = service.sync_edit_settings_to_filtered(
                 project_id=project.id,
                 source_asset_id=source_id,

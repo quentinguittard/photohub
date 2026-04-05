@@ -10,7 +10,7 @@ from pathlib import Path
 from sqlalchemy import select
 
 from ..config import load_settings
-from ..models import Asset, ExportRun, Project
+from ..models import Asset, CollectionAsset, ExportRun, Project
 from .projects import try_transition_project_status
 from .presets import resolve_effective_config_for_project_model
 from .quality_checks import assert_quality_for_export
@@ -21,7 +21,7 @@ from .watermarks import (
     normalize_watermark_config,
     render_template,
 )
-from ..utils import unique_path
+from ..utils import sanitize_filename_part, unique_path
 
 try:
     from PIL import Image, ImageColor, ImageDraw, ImageFont
@@ -74,6 +74,7 @@ class ExportService:
         create_zip: bool = False,
         create_report: bool = True,
         create_contact_sheet: bool = False,
+        collection_id: int | None = None,
         progress_cb=None,
         is_cancelled=None,
     ) -> ExportBatchResult:
@@ -105,6 +106,16 @@ class ExportService:
                     .order_by(Asset.id.asc())
                 ).all()
             )
+            if collection_id is not None:
+                allowed_ids = {
+                    int(r)
+                    for r in session.scalars(
+                        select(CollectionAsset.asset_id).where(
+                            CollectionAsset.collection_id == int(collection_id)
+                        )
+                    ).all()
+                }
+                assets = [a for a in assets if int(a.id) in allowed_ids]
             if not assets:
                 raise ValueError("Aucun asset exportable pour ce projet.")
 
@@ -281,49 +292,53 @@ class ExportService:
             shutil.copy2(src, dst.with_suffix(src.suffix.lower()))
             return
 
-        try:
-            with Image.open(src) as image:
-                image = image.convert("RGBA")
+        with Image.open(src) as image:
+            # Capture raw EXIF bytes before convert("RGBA") discards them.
+            raw_exif = image.info.get("exif", b"")
+            image = image.convert("RGBA")
 
-                if max_width > 0 and image.width > max_width:
-                    ratio = max_width / float(image.width)
-                    new_height = max(1, int(image.height * ratio))
-                    image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
+            if max_width > 0 and image.width > max_width:
+                ratio = max_width / float(image.width)
+                new_height = max(1, int(image.height * ratio))
+                image = image.resize((max_width, new_height), Image.Resampling.LANCZOS)
 
-                if watermark_cfg.get("enabled"):
-                    image, warnings = self._apply_watermark_layers(
-                        image=image,
-                        watermark_cfg=watermark_cfg,
-                        watermark_context=watermark_context,
-                        app_data_dir=app_data_dir,
-                    )
-                    if warning_cb is not None:
-                        for warning in warnings:
-                            warning_cb(str(warning))
+            if watermark_cfg.get("enabled"):
+                image, warnings = self._apply_watermark_layers(
+                    image=image,
+                    watermark_cfg=watermark_cfg,
+                    watermark_context=watermark_context,
+                    app_data_dir=app_data_dir,
+                )
+                if warning_cb is not None:
+                    for warning in warnings:
+                        warning_cb(str(warning))
 
-                if output_format in {"JPEG", "JPG"}:
-                    if image.mode in ("RGBA", "LA"):
-                        # Flatten alpha channel for JPEG export.
-                        base = Image.new("RGB", image.size, (255, 255, 255))
-                        base.paste(image, mask=image.split()[-1])
-                        image = base
-                    else:
-                        image = image.convert("RGB")
-                    image.save(dst, format="JPEG", quality=quality, optimize=True)
-                    return
+            if output_format in {"JPEG", "JPG"}:
+                if image.mode in ("RGBA", "LA"):
+                    # Flatten alpha channel for JPEG export.
+                    base = Image.new("RGB", image.size, (255, 255, 255))
+                    base.paste(image, mask=image.split()[-1])
+                    image = base
+                else:
+                    image = image.convert("RGB")
+                save_kwargs: dict = {"format": "JPEG", "quality": quality, "optimize": True}
+                if raw_exif:
+                    save_kwargs["exif"] = raw_exif
+                image.save(dst, **save_kwargs)
+                return
 
-                if output_format == "PNG":
-                    image.save(dst, format="PNG", optimize=True)
-                    return
+            if output_format == "PNG":
+                image.save(dst, format="PNG", optimize=True)
+                return
 
-                if output_format == "TIFF":
-                    image.save(dst, format="TIFF")
-                    return
+            if output_format == "TIFF":
+                save_kwargs = {"format": "TIFF"}
+                if raw_exif:
+                    save_kwargs["exif"] = raw_exif
+                image.save(dst, **save_kwargs)
+                return
 
-                image.save(dst)
-        except Exception:
-            # Unsupported format/decoder path fallback.
-            shutil.copy2(src, dst.with_suffix(src.suffix.lower()))
+            image.save(dst)
 
     def _apply_watermark_layers(
         self,
@@ -460,10 +475,6 @@ class ExportService:
         return image, None
 
     @staticmethod
-    def _normalize_opacity_percentage(value) -> int:
-        return normalize_watermark_opacity_percentage(value, default=70)
-
-    @staticmethod
     def _parse_rgb(value, *, fallback: tuple[int, int, int]) -> tuple[int, int, int]:
         try:
             parsed = ImageColor.getrgb(str(value or ""))
@@ -529,6 +540,9 @@ class ExportService:
         base_x, base_y = mapping.get(anchor, mapping["bottom_right"])
         x = int(round(base_x + (canvas_w * (offset_x_pct / 100.0))))
         y = int(round(base_y + (canvas_h * (offset_y_pct / 100.0))))
+        # Clamp so alpha_composite never receives out-of-bounds dest coordinates.
+        x = max(0, min(x, max(0, canvas_w - layer_w)))
+        y = max(0, min(y, max(0, canvas_h - layer_h)))
         return x, y
 
     @staticmethod
@@ -594,7 +608,7 @@ class ExportService:
         contact_sheet_path: Path | None,
     ) -> Path:
         stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        safe_name = "".join(c if c.isalnum() else "_" for c in project.name).strip("_") or "project"
+        safe_name = sanitize_filename_part(project.name) or "project"
         zip_path = output_root / f"{safe_name}_{stamp}_delivery.zip"
 
         with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -678,7 +692,7 @@ class ExportService:
             return None
 
         stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-        safe_name = "".join(c if c.isalnum() else "_" for c in project.name).strip("_") or "project"
+        safe_name = sanitize_filename_part(project.name) or "project"
         pdf_path = output_root / f"{safe_name}_{stamp}_contact_sheet.pdf"
 
         first, rest = pages[0], pages[1:]

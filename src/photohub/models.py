@@ -69,12 +69,46 @@ class Project(Base):
     client: Mapped["Client | None"] = relationship(back_populates="projects")
     preset: Mapped["Preset | None"] = relationship(back_populates="projects")
     assets: Mapped[list["Asset"]] = relationship(back_populates="project", cascade="all, delete-orphan")
+    collections: Mapped[list["Collection"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
     imports: Mapped[list["ImportRun"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
     exports: Mapped[list["ExportRun"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+
+
+class Collection(Base):
+    __tablename__ = "collections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    project: Mapped["Project"] = relationship(back_populates="collections")
+    items: Mapped[list["CollectionAsset"]] = relationship(
+        back_populates="collection",
+        cascade="all, delete-orphan",
+    )
+
+
+class CollectionAsset(Base):
+    __tablename__ = "collection_assets"
+
+    collection_id: Mapped[int] = mapped_column(
+        ForeignKey("collections.id", ondelete="CASCADE"), primary_key=True
+    )
+    asset_id: Mapped[int] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True
+    )
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+    collection: Mapped["Collection"] = relationship(back_populates="items")
+    asset: Mapped["Asset"] = relationship()
 
 
 class Asset(Base):
@@ -169,19 +203,3 @@ class JobEvent(Base):
     level: Mapped[str] = mapped_column(String(16), nullable=False, default="info")
     message: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-
-
-class BackupHistory(Base):
-    __tablename__ = "backups_history"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    label: Mapped[str | None] = mapped_column(String(160), nullable=True)
-    backup_path: Mapped[str] = mapped_column(Text, nullable=False)
-    manifest_path: Mapped[str] = mapped_column(Text, nullable=False)
-    db_checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    files_checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    status: Mapped[str] = mapped_column(String(24), nullable=False, default="created", index=True)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    restored_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

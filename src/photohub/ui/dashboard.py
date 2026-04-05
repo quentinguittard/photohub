@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..services import ProjectService, StorageService, JobQueueService
+from .. import __version__ as _APP_VERSION
 from .components import BentoCard
 
 
@@ -107,15 +108,15 @@ class DashboardTab(QWidget):
         hour = now.hour
         greeting = "Bonjour" if 6 <= hour < 18 else "Bonsoir"
         
-        title = QLabel(f"{greeting}, Studio.")
-        title.setObjectName("PageTitle")
-        title.setStyleSheet("font-size: 28px; font-weight: 800; color: #E8E8E8; background: transparent;")
+        self.title_label = QLabel(f"{greeting}, Studio.")
+        self.title_label.setObjectName("PageTitle")
+        self.title_label.setStyleSheet("font-size: 28px; font-weight: 800; color: #E8E8E8; background: transparent;")
         
         date_label = QLabel(now.strftime("%A %d %B %Y").capitalize())
         date_label.setStyleSheet("color: #7A7A7A; font-size: 14px; font-weight: 500; background: transparent;")
         
         text_layout = QVBoxLayout()
-        text_layout.addWidget(title)
+        text_layout.addWidget(self.title_label)
         text_layout.addWidget(date_label)
         layout.addLayout(text_layout)
         layout.addStretch()
@@ -282,6 +283,12 @@ class DashboardTab(QWidget):
         
         self.grid.addWidget(self.jobs_container, 2, 2, 1, 2) # Half width right
 
+        # Version chip (row 3, full width, right-aligned)
+        _ver_chip = QLabel(f"PhotoHub  v{_APP_VERSION}")
+        _ver_chip.setStyleSheet("font-size: 10px; color: #444;")
+        _ver_chip.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.grid.addWidget(_ver_chip, 3, 0, 1, 4)
+
     def refresh_data(self) -> None:
         projects = self.project_service.list_projects() or []
         total = len(projects)
@@ -319,10 +326,17 @@ class DashboardTab(QWidget):
         # Update Recent
         self._update_recent_list(projects[:5])
         
-        # Update Banner if set in settings
+        # Update Banner and studio name from settings
         settings = self.storage_service.get_settings() if self.storage_service else {}
         banner_path = settings.get("dashboard_banner")
         self.set_banner(banner_path)
+
+        # Update greeting with actual studio name
+        now = datetime.now()
+        greeting = "Bonjour" if 6 <= now.hour < 18 else "Bonsoir"
+        studio_name = settings.get("studio_profile", {}).get("studio_name", "").strip()
+        display_name = studio_name if studio_name else "Studio"
+        self.title_label.setText(f"{greeting}, {display_name}.")
         
         # Update Jobs
         self._refresh_jobs_only()

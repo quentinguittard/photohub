@@ -129,5 +129,62 @@ class RenameServiceTests(unittest.TestCase):
             td.cleanup()
 
 
+class RenameNamingTagTests(unittest.TestCase):
+    """Tests for {client} and {preset} tags in the rename service."""
+
+    def test_format_target_stem_client_tag(self):
+        """_format_target_stem must embed client name when {client} is in the pattern."""
+        from photohub.services.renames import RenameService
+        result = RenameService._format_target_stem(
+            pattern="{project}_{client}_{seq:03d}",
+            project="MyProject",
+            shoot_date="20260301",
+            seq=3,
+            orig="original",
+            client="Dupont_Mariage",
+        )
+        self.assertIn("Dupont_Mariage", result)
+        self.assertNotIn("__", result)
+
+    def test_format_target_stem_preset_tag(self):
+        """_format_target_stem must embed preset name when {preset} is in the pattern."""
+        from photohub.services.renames import RenameService
+        result = RenameService._format_target_stem(
+            pattern="{project}_{preset}_{date}_{seq:04d}",
+            project="Shoot",
+            shoot_date="20260301",
+            seq=1,
+            orig="img",
+            preset="Wedding_Pro",
+        )
+        self.assertIn("Wedding_Pro", result)
+        self.assertNotIn("__", result)
+
+    def test_missing_client_no_double_underscore(self):
+        """When client is empty, the resulting stem must not contain consecutive underscores."""
+        from photohub.services.renames import RenameService
+        result = RenameService._format_target_stem(
+            pattern="{project}_{client}_{date}_{seq:04d}",
+            project="Shoot",
+            shoot_date="20260301",
+            seq=1,
+            orig="img",
+            client="",  # no client
+        )
+        self.assertNotIn("__", result)
+
+    def test_legacy_pattern_unaffected(self):
+        """Patterns without {client}/{preset} must produce the same result as before."""
+        from photohub.services.renames import RenameService
+        result = RenameService._format_target_stem(
+            pattern="{project}_{date}_{seq:04d}",
+            project="Wedding",
+            shoot_date="20260301",
+            seq=7,
+            orig="IMG_0007",
+        )
+        self.assertEqual(result, "Wedding_20260301_0007")
+
+
 if __name__ == "__main__":
     unittest.main()

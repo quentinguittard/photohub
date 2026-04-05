@@ -156,5 +156,75 @@ class MetadataFeatureTests(unittest.TestCase):
             td.cleanup()
 
 
+@unittest.skipUnless(PIL_AVAILABLE, "Pillow requis pour tests IPTC IIM.")
+class IptcExtractionTests(unittest.TestCase):
+    """Regression tests for P1-5: IPTC IIM data must take precedence over EXIF tags."""
+
+    @staticmethod
+    def _write_jpeg_with_iptc(path: Path, *, author: str, copyright_text: str, keywords: list) -> None:
+        """Write a minimal JPEG embedding real IPTC IIM records in APP13."""
+        import io
+        import struct
+
+        assert Image is not None
+
+        def _iptc_field(dataset: int, value: str) -> bytes:
+            encoded = value.encode("utf-8")
+            return b"\x1c\x02" + bytes([dataset]) + struct.pack(">H", len(encoded)) + encoded
+
+        iptc_payload = b""
+        for kw in keywords:
+            iptc_payload += _iptc_field(25, kw)       # (2, 25) Keywords
+        iptc_payload += _iptc_field(80, author)        # (2, 80) By-line
+        iptc_payload += _iptc_field(116, copyright_text)  # (2, 116) Copyright Notice
+
+        # Wrap in Photoshop 8BIM resource block (resource ID 0x0404 = IPTC-NAA).
+        padded = iptc_payload + (b"\x00" if len(iptc_payload) % 2 else b"")
+        resource_block = (
+            b"8BIM" + b"\x04\x04" + b"\x00\x00"
+            + struct.pack(">I", len(iptc_payload)) + padded
+        )
+        app13_data = b"Photoshop 3.0\x00" + resource_block
+        app13_segment = b"\xff\xed" + struct.pack(">H", len(app13_data) + 2) + app13_data
+
+        # Splice APP13 segment right after JPEG SOI marker.
+        buf = io.BytesIO()
+        Image.new("RGB", (20, 20), color=(0, 0, 0)).save(buf, format="JPEG")
+        raw = buf.getvalue()
+        path.write_bytes(raw[:2] + app13_segment + raw[2:])
+
+    def test_iptc_author_and_copyright_preferred_over_exif(self):
+        """True IPTC IIM fields must be returned instead of EXIF Artist/Copyright."""
+        from photohub.services.metadata import extract_embedded_metadata
+        with tempfile.TemporaryDirectory() as td:
+            img_path = Path(td) / "iptc_test.jpg"
+            self._write_jpeg_with_iptc(
+                img_path,
+                author="IPTC Author",
+                copyright_text="IPTC Copyright 2026",
+                keywords=["wedding", "portrait"],
+            )
+            result = extract_embedded_metadata(img_path)
+            self.assertEqual(result["iptc"]["author"], "IPTC Author")
+            self.assertIn("IPTC Copyright", result["iptc"]["copyright"])
+            self.assertIn("wedding", result["iptc"]["keywords"])
+            self.assertIn("portrait", result["iptc"]["keywords"])
+
+    def test_exif_fallback_used_when_no_iptc(self):
+        """When no IPTC block is present, EXIF Artist/Copyright are still returned."""
+        from photohub.services.metadata import extract_embedded_metadata
+        with tempfile.TemporaryDirectory() as td:
+            img_path = Path(td) / "exif_only.jpg"
+            img = Image.new("RGB", (20, 20), color=(128, 128, 128))
+            exif = img.getexif()
+            exif[315] = "EXIF Author"
+            exif[33432] = "EXIF Copyright 2026"
+            img.save(img_path, format="JPEG", exif=exif.tobytes())
+
+            result = extract_embedded_metadata(img_path)
+            self.assertEqual(result["iptc"]["author"], "EXIF Author")
+            self.assertIn("EXIF Copyright", result["iptc"]["copyright"])
+
+
 if __name__ == "__main__":
     unittest.main()

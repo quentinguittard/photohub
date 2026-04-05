@@ -26,15 +26,18 @@ class PreviewPrefetchTests(unittest.TestCase):
             self._create_test_image(src, (120, 50, 40))
 
             cache = DiskImageCache(root / "cache", max_cache_bytes=128 * 1024 * 1024, min_free_bytes=1)
-            p1 = cache.get_or_create_cached_path(src, kind="preview", width=1600, height=1600)
-            self.assertIsNotNone(p1)
-            assert p1 is not None
-            self.assertTrue(p1.exists())
+            try:
+                p1 = cache.get_or_create_cached_path(src, kind="preview", width=1600, height=1600)
+                self.assertIsNotNone(p1)
+                assert p1 is not None
+                self.assertTrue(p1.exists())
 
-            p2 = cache.get_existing_cached_path(src, kind="preview", width=1600, height=1600)
-            self.assertIsNotNone(p2)
-            assert p2 is not None
-            self.assertEqual(p1, p2)
+                p2 = cache.get_existing_cached_path(src, kind="preview", width=1600, height=1600)
+                self.assertIsNotNone(p2)
+                assert p2 is not None
+                self.assertEqual(p1, p2)
+            finally:
+                cache.close()
 
     def test_prefetch_manager_warms_next_asset(self):
         with tempfile.TemporaryDirectory() as td:

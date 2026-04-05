@@ -89,13 +89,17 @@ class StorageService:
             raise ValueError("Une migration est deja en cours.")
 
         self._migration_running = True
+        # Resolve old paths before entering the guarded try so the except
+        # handler can always reference old_data_dir for safe rollback.
+        current_paths = resolve_app_paths()
+        old_data_dir = current_paths.data_dir
         try:
-            current_paths = resolve_app_paths()
-            old_data_dir = current_paths.data_dir
             new_data_dir = compute_app_data_dir_from_root(new_root)
 
+            # Record that a migration is in progress WITHOUT changing storage_root
+            # or active_data_dir. Those are only updated once the copy succeeds, so
+            # a crash during the copy leaves the app pointing at the original data.
             settings = load_settings()
-            settings["storage_root"] = str(new_data_dir)
             settings["last_migration_status"] = "running"
             settings["last_migration_error"] = None
             save_settings(settings)
@@ -105,6 +109,8 @@ class StorageService:
                     db_path=old_data_dir / "photohub.db",
                     active_projects_dir=old_data_dir / "projects",
                 )
+                settings = load_settings()
+                settings["storage_root"] = str(new_data_dir)
                 settings["active_data_dir"] = str(new_data_dir)
                 settings["last_migration_status"] = "completed"
                 settings["last_migration_error"] = None
@@ -122,6 +128,7 @@ class StorageService:
                 active_projects_dir=new_data_dir / "projects",
             )
 
+            # Copy succeeded: now commit the new paths to settings.
             settings = load_settings()
             settings["storage_root"] = str(new_data_dir)
             settings["active_data_dir"] = str(new_data_dir)
@@ -135,10 +142,17 @@ class StorageService:
                 message="Migration terminee. L'ancien dossier est conserve.",
             )
         except Exception as exc:
-            settings = load_settings()
-            settings["last_migration_status"] = "failed"
-            settings["last_migration_error"] = str(exc)
-            save_settings(settings)
+            # Restore storage_root to the original location so the next startup
+            # still opens the old (intact) data directory.
+            try:
+                settings = load_settings()
+                settings["storage_root"] = str(old_data_dir)
+                settings["active_data_dir"] = str(old_data_dir)
+                settings["last_migration_status"] = "failed"
+                settings["last_migration_error"] = str(exc)
+                save_settings(settings)
+            except Exception:
+                pass
             raise
         finally:
             self._migration_running = False
@@ -159,6 +173,11 @@ class StorageService:
         target_projects = temp_dir / "projects"
 
         if source_db.exists():
+            # Checkpoint any WAL journal into the main DB file before copying.
+            # TRUNCATE mode merges all WAL frames and resets the WAL to zero
+            # bytes, making a plain file-copy of the .db file complete and safe.
+            # This is a no-op when WAL mode is not active.
+            self._checkpoint_wal(source_db)
             shutil.copy2(source_db, target_db)
         if source_projects.exists():
             shutil.copytree(source_projects, target_projects, dirs_exist_ok=True)
@@ -188,6 +207,25 @@ class StorageService:
             merged_projects.mkdir(parents=True, exist_ok=True)
 
         shutil.rmtree(temp_dir)
+
+    @staticmethod
+    def _checkpoint_wal(db_path: Path) -> None:
+        """Force a WAL checkpoint on *db_path* before the file is copied.
+
+        SQLite WAL mode keeps recently committed pages in a separate -wal file.
+        A plain shutil.copy2 of the main DB file alone would miss those pages.
+        TRUNCATE mode merges all WAL frames into the main file and resets the
+        WAL to zero length so the copy is self-contained. When WAL mode is not
+        active this call is a harmless no-op.
+        """
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception:
+            # Non-fatal: if checkpoint fails (e.g. locked by another process)
+            # the copy still proceeds. The worst case is missing in-flight WAL
+            # pages, which is the same as the previous behaviour.
+            pass
 
     @staticmethod
     def _verify_migrated_data(data_dir: Path) -> None:

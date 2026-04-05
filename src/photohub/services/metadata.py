@@ -10,9 +10,32 @@ from sqlalchemy import select
 from ..models import Asset
 
 try:
-    from PIL import Image
+    from PIL import Image, IptcImagePlugin as _IptcImagePlugin
 except Exception:  # pragma: no cover - optional fallback
     Image = None
+    _IptcImagePlugin = None
+
+
+def _iptc_str(value) -> str:
+    """Decode a single IPTC field value to a plain string."""
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else b""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace").strip()
+    return str(value or "").strip()
+
+
+def _iptc_keywords_text(value) -> str:
+    """Flatten IPTC keyword list to a pipe-delimited string."""
+    if not value:
+        return ""
+    if isinstance(value, bytes):
+        value = [value]
+    return "|".join(
+        v.decode("utf-8", errors="replace").strip() if isinstance(v, bytes) else str(v).strip()
+        for v in value
+        if v
+    )
 
 
 def _to_text(value) -> str:
@@ -198,10 +221,21 @@ def extract_embedded_metadata(file_path: Path) -> dict:
             payload["exif"]["datetime_original"] = iso_dt
             payload["exif"]["shot_date"] = shot_date
 
-            keywords = normalize_keywords(xp_keywords)
+            # Prefer true IPTC IIM records (APP13) over EXIF-only tags.
+            iptc_info: dict = {}
+            if _IptcImagePlugin is not None:
+                try:
+                    iptc_info = _IptcImagePlugin.getiptcinfo(img) or {}
+                except Exception:
+                    pass
+            iptc_kw_text = _iptc_keywords_text(iptc_info.get((2, 25)))   # Keywords
+            iptc_author  = _iptc_str(iptc_info.get((2, 80)))              # By-line
+            iptc_cr      = _iptc_str(iptc_info.get((2, 116)))             # Copyright Notice
+
+            keywords = normalize_keywords(iptc_kw_text or xp_keywords)
             payload["iptc"]["keywords"] = keywords
-            payload["iptc"]["author"] = artist
-            payload["iptc"]["copyright"] = copyright_text
+            payload["iptc"]["author"] = iptc_author or artist
+            payload["iptc"]["copyright"] = iptc_cr or copyright_text
     except Exception:
         return payload
 

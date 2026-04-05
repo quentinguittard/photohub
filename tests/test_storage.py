@@ -14,7 +14,9 @@ from photohub.services.storage import StorageService
 
 class StorageMigrationTests(unittest.TestCase):
     def setUp(self):
-        self.tempdir = tempfile.TemporaryDirectory()
+        # ignore_cleanup_errors=True avoids teardown failures on Windows when
+        # SQLite WAL shared-memory files (.db-shm) are briefly locked.
+        self.tempdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.old_appdata = os.environ.get('APPDATA')
         os.environ['APPDATA'] = self.tempdir.name
 
@@ -82,6 +84,38 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertEqual(load_settings()['last_migration_status'], 'failed')
 
+    def test_migration_failure_does_not_corrupt_storage_root(self):
+        """P0-3 regression: storage_root must NOT be updated before the copy
+        completes. On migration failure, storage_root must still point to the
+        original data directory so the app opens the correct data on restart."""
+        service = StorageService()
+        settings_before = load_settings()
+        before_storage_root = settings_before['storage_root']
+        before_active_data_dir = settings_before['active_data_dir']
+
+        # Use a path whose parent is a file – this forces _copy_then_switch to fail.
+        invalid_file = Path(self.tempdir.name) / 'blocker'
+        invalid_file.write_text('block', encoding='utf-8')
+
+        with self.assertRaises(Exception):
+            service.set_global_storage_root(invalid_file)
+
+        settings_after = load_settings()
+        # storage_root must be preserved exactly as it was before the migration attempt.
+        self.assertEqual(
+            settings_after['storage_root'],
+            before_storage_root,
+            "storage_root must not be changed when migration fails.",
+        )
+        # active_data_dir must also be intact.
+        self.assertEqual(
+            settings_after['active_data_dir'],
+            before_active_data_dir,
+            "active_data_dir must not be changed when migration fails.",
+        )
+        # Status must reflect failure.
+        self.assertEqual(settings_after['last_migration_status'], 'failed')
+
     def test_apply_same_location_repairs_stale_paths(self):
         service = StorageService()
         settings = load_settings()
@@ -124,6 +158,46 @@ class StorageMigrationTests(unittest.TestCase):
         result = service.set_global_storage_root(new_root)
         self.assertEqual(result.status, "completed")
         self.assertTrue(keep_file.exists())
+
+
+    def test_migration_copies_wal_data_to_new_db(self):
+        """P0-4 regression: data written while WAL mode is active must be
+        present in the migrated database. The migration must checkpoint the
+        WAL before copying so no recently committed data is lost."""
+        settings = load_settings()
+        db_path = Path(settings['active_data_dir']) / 'photohub.db'
+
+        # Enable WAL mode and disable auto-checkpoint so we can control when
+        # WAL frames are merged back into the main database file.
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA wal_autocheckpoint=0")  # prevent auto-merge
+
+        # Insert a sentinel row via a raw sqlite3 connection (without checkpoint).
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute(
+                "INSERT INTO clients (name, created_at) VALUES ('WAL_SENTINEL', datetime('now'))"
+            )
+            conn.commit()
+            # At this point the row is in the WAL file, not the main DB file.
+            # Verify WAL file was actually written.
+            wal_file = db_path.parent / (db_path.name + "-wal")
+            self.assertTrue(wal_file.exists(), "WAL file must exist after write with auto-checkpoint=0.")
+
+        # Migrate to a new location.  The migration must checkpoint before copy.
+        service = StorageService()
+        new_root = Path(self.tempdir.name) / 'wal_migration_dest'
+        result = service.set_global_storage_root(new_root)
+        self.assertEqual(result.status, 'completed')
+
+        # The sentinel row must exist in the new database.
+        new_db_path = Path(load_settings()['active_data_dir']) / 'photohub.db'
+        with sqlite3.connect(str(new_db_path)) as conn:
+            row = conn.execute(
+                "SELECT name FROM clients WHERE name = 'WAL_SENTINEL'"
+            ).fetchone()
+        self.assertIsNotNone(row, "WAL-written row must be present in the migrated database.")
+        self.assertEqual(row[0], 'WAL_SENTINEL')
 
 
 if __name__ == '__main__':

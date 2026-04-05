@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,13 @@ except Exception:  # pragma: no cover - optional dependency fallback
 
 
 class DiskImageCache:
+    # How many new entries to accumulate before triggering a prune check.
+    _PRUNE_ENTRY_THRESHOLD = 50
+    # Minimum seconds between prune runs (even if threshold is hit repeatedly).
+    _PRUNE_INTERVAL_SECS = 30.0
+    # Seconds between write-behind flushes of last_access_utc updates.
+    _ACCESS_FLUSH_INTERVAL_SECS = 10.0
+
     def __init__(
         self,
         root: Path,
@@ -33,35 +41,45 @@ class DiskImageCache:
         self.min_free_bytes = max(0, int(min_free_bytes))
         self._db_path = self.root / "index.sqlite3"
         self._lock = threading.Lock()
+        # Thread-local storage for persistent per-thread sqlite3 connections.
+        self._tls = threading.local()
+        # All opened connections tracked so close() can release them all.
+        self._connections: list[sqlite3.Connection] = []
+        # Write-behind buffer: cache_key -> iso-format access time string.
+        # Flushed periodically instead of on every cache hit.
+        self._pending_access: dict[str, str] = {}
+        self._last_access_flush: float = 0.0
+        # Prune throttling counters.
+        self._entries_since_prune: int = 0
+        self._last_prune_time: float = 0.0
         self._ensure_schema()
+
+    # ------------------------------------------------------------------ #
+    #  Public API                                                          #
+    # ------------------------------------------------------------------ #
 
     def get_existing_cached_path(self, src_path: Path, *, kind: str, width: int, height: int) -> Path | None:
         src = Path(src_path).expanduser().resolve()
         if not src.exists():
             return None
         key = self._build_key(src, kind=kind, width=width, height=height)
+        conn = self._get_conn()
+        row = conn.execute(
+            "SELECT rel_path FROM image_cache_entries WHERE cache_key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        target = self.root / str(row[0])
+        if not target.exists():
+            conn.execute("DELETE FROM image_cache_entries WHERE cache_key = ?", (key,))
+            conn.commit()
+            return None
+        # Defer the last_access update — no commit on every hit.
         with self._lock:
-            conn = self._connect()
-            try:
-                row = conn.execute(
-                    "SELECT rel_path FROM image_cache_entries WHERE cache_key = ?",
-                    (key,),
-                ).fetchone()
-                if row is None:
-                    return None
-                target = self.root / str(row[0])
-                if not target.exists():
-                    conn.execute("DELETE FROM image_cache_entries WHERE cache_key = ?", (key,))
-                    conn.commit()
-                    return None
-                conn.execute(
-                    "UPDATE image_cache_entries SET last_access_utc = ? WHERE cache_key = ?",
-                    (self._utc_now_text(), key),
-                )
-                conn.commit()
-                return target
-            finally:
-                conn.close()
+            self._pending_access[key] = self._utc_now_text()
+            self._maybe_flush_access(conn)
+        return target
 
     def get_or_create_cached_path(self, src_path: Path, *, kind: str, width: int, height: int) -> Path | None:
         existing = self.get_existing_cached_path(src_path, kind=kind, width=width, height=height)
@@ -69,8 +87,12 @@ class DiskImageCache:
             return existing
         created = self._create_entry(Path(src_path), kind=kind, width=width, height=height)
         if created is not None:
-            self._prune_if_needed()
+            self._throttled_prune()
         return created
+
+    # ------------------------------------------------------------------ #
+    #  Internal helpers                                                    #
+    # ------------------------------------------------------------------ #
 
     def _create_entry(self, src_path: Path, *, kind: str, width: int, height: int) -> Path | None:
         src = Path(src_path).expanduser().resolve()
@@ -95,115 +117,168 @@ class DiskImageCache:
 
         src_stat = src.stat()
         size_bytes = int(target.stat().st_size)
+        now_text = self._utc_now_text()
+        conn = self._get_conn()
+        conn.execute(
+            """
+            INSERT INTO image_cache_entries (
+                cache_key, kind, src_path, src_mtime_ns, src_size_bytes, rel_path, bytes_size,
+                created_utc, last_access_utc
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cache_key) DO UPDATE SET
+                rel_path=excluded.rel_path,
+                bytes_size=excluded.bytes_size,
+                last_access_utc=excluded.last_access_utc
+            """,
+            (
+                key,
+                kind,
+                str(src),
+                int(src_stat.st_mtime_ns),
+                int(src_stat.st_size),
+                str(target_rel).replace("\\", "/"),
+                size_bytes,
+                now_text,
+                now_text,
+            ),
+        )
+        conn.commit()
         with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO image_cache_entries (
-                        cache_key, kind, src_path, src_mtime_ns, src_size_bytes, rel_path, bytes_size,
-                        created_utc, last_access_utc
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(cache_key) DO UPDATE SET
-                        rel_path=excluded.rel_path,
-                        bytes_size=excluded.bytes_size,
-                        last_access_utc=excluded.last_access_utc
-                    """,
-                    (
-                        key,
-                        kind,
-                        str(src),
-                        int(src_stat.st_mtime_ns),
-                        int(src_stat.st_size),
-                        str(target_rel).replace("\\", "/"),
-                        size_bytes,
-                        self._utc_now_text(),
-                        self._utc_now_text(),
-                    ),
-                )
-                conn.commit()
-            finally:
-                conn.close()
+            self._entries_since_prune += 1
         return target
 
-    def _prune_if_needed(self) -> None:
+    def _throttled_prune(self) -> None:
+        """Run _prune_if_needed() at most once per threshold/interval."""
+        now = time.monotonic()
         with self._lock:
-            conn = self._connect()
+            entries = self._entries_since_prune
+            elapsed = now - self._last_prune_time
+            should_prune = (
+                entries >= self._PRUNE_ENTRY_THRESHOLD
+                or elapsed >= self._PRUNE_INTERVAL_SECS
+            )
+            if not should_prune:
+                return
+            self._entries_since_prune = 0
+            self._last_prune_time = now
+        self._prune_if_needed()
+
+    def _maybe_flush_access(self, conn) -> None:
+        """Flush write-behind last_access updates if the flush interval has elapsed.
+
+        Must be called with self._lock held.
+        """
+        now = time.monotonic()
+        if now - self._last_access_flush < self._ACCESS_FLUSH_INTERVAL_SECS:
+            return
+        if not self._pending_access:
+            self._last_access_flush = now
+            return
+        pending = dict(self._pending_access)
+        self._pending_access.clear()
+        self._last_access_flush = now
+        # Execute outside the lock would require releasing first; instead do it
+        # inline since conn is already open on this thread and the lock window is tiny.
+        conn.executemany(
+            "UPDATE image_cache_entries SET last_access_utc = ? WHERE cache_key = ?",
+            [(ts, key) for key, ts in pending.items()],
+        )
+        conn.commit()
+
+    def _prune_if_needed(self) -> None:
+        conn = self._get_conn()
+        total_row = conn.execute("SELECT COALESCE(SUM(bytes_size), 0) FROM image_cache_entries").fetchone()
+        total_size = int(total_row[0] if total_row else 0)
+        disk = shutil.disk_usage(self.root)
+        # Keep cache below 15% of disk and under configured max.
+        hard_cap = max(1, min(self.max_cache_bytes, int(disk.total * 0.15)))
+        needs_size_prune = total_size > hard_cap
+        needs_free_prune = self.min_free_bytes > 0 and disk.free < self.min_free_bytes
+        if not needs_size_prune and not needs_free_prune:
+            return
+        target_size = int(hard_cap * 0.7) if needs_size_prune else total_size
+        rows = conn.execute(
+            """
+            SELECT cache_key, rel_path, bytes_size
+              FROM image_cache_entries
+             ORDER BY last_access_utc ASC, created_utc ASC
+            """
+        ).fetchall()
+        removed = 0
+        for cache_key, rel_path, bytes_size in rows:
+            current_free = shutil.disk_usage(self.root).free
+            if total_size <= target_size and (
+                self.min_free_bytes <= 0 or current_free >= self.min_free_bytes
+            ):
+                break
+            file_path = self.root / str(rel_path)
             try:
-                total_row = conn.execute("SELECT COALESCE(SUM(bytes_size), 0) FROM image_cache_entries").fetchone()
-                total_size = int(total_row[0] if total_row else 0)
-                disk = shutil.disk_usage(self.root)
-                # Keep cache below 15%% of disk and under configured max.
-                hard_cap = max(1, min(self.max_cache_bytes, int(disk.total * 0.15)))
-                needs_size_prune = total_size > hard_cap
-                needs_free_prune = self.min_free_bytes > 0 and disk.free < self.min_free_bytes
-                if not needs_size_prune and not needs_free_prune:
-                    return
-                target_size = int(hard_cap * 0.7) if needs_size_prune else total_size
-                rows = conn.execute(
-                    """
-                    SELECT cache_key, rel_path, bytes_size
-                      FROM image_cache_entries
-                     ORDER BY last_access_utc ASC, created_utc ASC
-                    """
-                ).fetchall()
-                removed = 0
-                for cache_key, rel_path, bytes_size in rows:
-                    current_free = shutil.disk_usage(self.root).free
-                    if total_size <= target_size and (
-                        self.min_free_bytes <= 0 or current_free >= self.min_free_bytes
-                    ):
-                        break
-                    file_path = self.root / str(rel_path)
-                    try:
-                        if file_path.exists():
-                            file_path.unlink()
-                    except Exception:
-                        pass
-                    conn.execute("DELETE FROM image_cache_entries WHERE cache_key = ?", (str(cache_key),))
-                    removed += int(bytes_size or 0)
-                    total_size = max(0, total_size - int(bytes_size or 0))
-                if removed > 0:
-                    conn.commit()
-            finally:
-                conn.close()
+                if file_path.exists():
+                    file_path.unlink()
+            except Exception:
+                pass
+            conn.execute("DELETE FROM image_cache_entries WHERE cache_key = ?", (str(cache_key),))
+            removed += int(bytes_size or 0)
+            total_size = max(0, total_size - int(bytes_size or 0))
+        if removed > 0:
+            conn.commit()
 
     def _ensure_schema(self) -> None:
-        with self._lock:
-            conn = self._connect()
-            try:
-                conn.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS image_cache_entries (
-                        cache_key TEXT PRIMARY KEY,
-                        kind TEXT NOT NULL,
-                        src_path TEXT NOT NULL,
-                        src_mtime_ns INTEGER NOT NULL,
-                        src_size_bytes INTEGER NOT NULL,
-                        rel_path TEXT NOT NULL,
-                        bytes_size INTEGER NOT NULL,
-                        created_utc TEXT NOT NULL,
-                        last_access_utc TEXT NOT NULL
-                    )
-                    """
-                )
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_image_cache_last_access ON image_cache_entries(last_access_utc)"
-                )
-                conn.commit()
-            finally:
-                conn.close()
+        conn = self._get_conn()
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS image_cache_entries (
+                cache_key TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                src_path TEXT NOT NULL,
+                src_mtime_ns INTEGER NOT NULL,
+                src_size_bytes INTEGER NOT NULL,
+                rel_path TEXT NOT NULL,
+                bytes_size INTEGER NOT NULL,
+                created_utc TEXT NOT NULL,
+                last_access_utc TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_cache_last_access ON image_cache_entries(last_access_utc)"
+        )
+        conn.commit()
 
     def _build_key(self, src: Path, *, kind: str, width: int, height: int) -> str:
         stat = src.stat()
         raw = f"{src}|{int(stat.st_mtime_ns)}|{int(stat.st_size)}|{kind}|{int(width)}x{int(height)}"
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
-    def _connect(self):
-        conn = sqlite3.connect(str(self._db_path))
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
+    def close(self) -> None:
+        """Close all persistent thread-local connections held by this instance.
+
+        Call this when the cache is no longer needed (e.g. in test teardown or
+        PreviewPrefetchManager.shutdown()) so SQLite WAL/SHM files are released
+        before the directory is deleted — critical on Windows (WinError 267).
+        """
+        with self._lock:
+            conns = list(self._connections)
+            self._connections.clear()
+        for conn in conns:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        # Clear the current thread's reference so _get_conn() re-creates if needed.
+        self._tls.conn = None
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Return a persistent per-thread sqlite3 connection, creating it on first use."""
+        conn = getattr(self._tls, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(str(self._db_path))
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            self._tls.conn = conn
+            with self._lock:
+                self._connections.append(conn)
         return conn
 
     @staticmethod
@@ -321,7 +396,8 @@ class PreviewPrefetchManager:
             self._futures.clear()
         for future in futures:
             future.cancel()
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        self.cache.close()
 
     def _schedule_prefetch(self, src_path: Path) -> None:
         key = str(Path(src_path).expanduser().resolve())

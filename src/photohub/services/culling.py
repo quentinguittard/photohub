@@ -36,6 +36,16 @@ class CullingService:
     def __init__(self, session_factory):
         self.session_factory = session_factory
 
+    def list_distinct_color_labels(self, project_id: int) -> list[str]:
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(Asset.color_label)
+                .where(Asset.project_id == project_id, Asset.color_label.is_not(None))
+                .distinct()
+                .order_by(Asset.color_label.asc())
+            ).all()
+            return [r for r in rows if r]
+
     def list_assets(
         self,
         project_id: int,
@@ -47,6 +57,7 @@ class CullingService:
         keyword: str = "",
         shot_date_from: str | None = None,
         shot_date_to: str | None = None,
+        color_label_filter: str | None = None,
     ) -> list[AssetItem]:
         safe_rating = max(0, min(int(min_rating), 5))
         safe_iso_min = _safe_int_or_none(iso_min)
@@ -78,6 +89,8 @@ class CullingService:
                 query = query.where(Asset.exif_shot_date.is_not(None), Asset.exif_shot_date >= safe_date_from)
             if safe_date_to:
                 query = query.where(Asset.exif_shot_date.is_not(None), Asset.exif_shot_date <= safe_date_to)
+            if color_label_filter is not None:
+                query = query.where(Asset.color_label == color_label_filter)
 
             assets = list(session.scalars(query.order_by(Asset.id.asc())).all())
             return [
@@ -123,21 +136,6 @@ class CullingService:
                 try_transition_project_status(project, "en_tri")
 
             session.commit()
-
-    def toggle_rejected(self, asset_id: int) -> bool:
-        with self.session_factory() as session:
-            asset = session.get(Asset, asset_id)
-            if asset is None:
-                raise ValueError("Asset introuvable.")
-            asset.is_rejected = not asset.is_rejected
-            asset.workflow_state = "culled"
-
-            project = session.get(Project, asset.project_id)
-            if project is not None:
-                try_transition_project_status(project, "en_tri")
-
-            session.commit()
-            return asset.is_rejected
 
     def bulk_update_filtered(
         self,

@@ -3,11 +3,25 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass
 
+from PySide6.QtCore import QtMsgType, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
+
+
+def _qt_message_handler(msg_type: QtMsgType, context, message: str) -> None:
+    """Suppress noisy Qt plugin warnings that are harmless in production."""
+    # Qt's TIFF reader warns about null bytes in Artist/Copyright ASCII tags —
+    # this is a benign TIFF spec quirk, not an error we need to surface.
+    low = message.lower()
+    if "null byte" in low:
+        return
+    if msg_type in (QtMsgType.QtDebugMsg, QtMsgType.QtInfoMsg):
+        return
+    print(message, file=sys.stderr)
 
 from .config import resolve_app_paths
 from .db import create_session_factory, create_sqlite_engine, init_db
 from .services import (
+    CollectionService,
     CullingService,
     EditService,
     ExportService,
@@ -29,6 +43,7 @@ class RuntimeBundle:
     project_service: ProjectService
     preset_service: PresetService
     culling_service: CullingService
+    collection_service: CollectionService
     edit_service: EditService
     import_service: ImportService
     export_service: ExportService
@@ -49,6 +64,7 @@ def build_runtime() -> RuntimeBundle:
         project_service=ProjectService(session_factory=session_factory, paths=paths),
         preset_service=PresetService(session_factory=session_factory),
         culling_service=CullingService(session_factory=session_factory),
+        collection_service=CollectionService(session_factory=session_factory),
         edit_service=EditService(session_factory=session_factory),
         import_service=ImportService(session_factory=session_factory),
         export_service=ExportService(session_factory=session_factory),
@@ -62,6 +78,7 @@ def main() -> int:
     # Build QApplication first to avoid any indirect QWidget construction
     # from optional UI dependencies during startup.
     app = QApplication(sys.argv)
+    qInstallMessageHandler(_qt_message_handler)
 
     runtime = build_runtime()
     storage_service = StorageService()
@@ -79,6 +96,7 @@ def main() -> int:
         project_service=runtime.project_service,
         preset_service=runtime.preset_service,
         culling_service=runtime.culling_service,
+        collection_service=runtime.collection_service,
         edit_service=runtime.edit_service,
         import_service=runtime.import_service,
         export_service=runtime.export_service,

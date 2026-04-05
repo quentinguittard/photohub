@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from ..models import Client, Preset, PresetVersion, Project
+from ..models import Preset, PresetVersion, Project
 from ..preset_defaults import default_preset_config
 from .watermarks import normalize_watermark_config
 
@@ -155,18 +155,6 @@ class PresetService:
             if project is None:
                 raise ValueError("Projet introuvable.")
             return resolve_effective_config_for_project_model(session, project)
-
-    def list_client_refs(self) -> list[tuple[int, str]]:
-        with self.session_factory() as session:
-            query = select(Client).order_by(Client.name.asc())
-            clients = list(session.scalars(query).all())
-            return [(item.id, item.name) for item in clients]
-
-    def list_project_refs(self) -> list[tuple[int, str]]:
-        with self.session_factory() as session:
-            query = select(Project).order_by(Project.created_at.desc())
-            projects = list(session.scalars(query).all())
-            return [(item.id, item.name) for item in projects]
 
     @staticmethod
     def _append_version(session, preset: Preset, config_json: str) -> PresetVersion:

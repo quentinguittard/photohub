@@ -158,5 +158,60 @@ class ProjectCustomRootTests(unittest.TestCase):
             engine.dispose()
 
 
+class UpdateProjectFsmTests(unittest.TestCase):
+    """Regression tests for P1-3: update_project must enforce FSM transitions."""
+
+    def _build_service(self, td):
+        base = Path(td)
+        db_path = base / "db.sqlite"
+        projects_dir = base / "projects"
+        projects_dir.mkdir(parents=True, exist_ok=True)
+        engine = create_sqlite_engine(db_path)
+        init_db(engine)
+        session_factory = create_session_factory(engine)
+        service = ProjectService(
+            session_factory=session_factory,
+            paths=AppPaths(data_dir=base, db_path=db_path, projects_dir=projects_dir),
+        )
+        return engine, service
+
+    def test_update_project_rejects_illegal_status_jump(self):
+        """update_project(status=...) must raise ValueError for invalid transitions."""
+        with tempfile.TemporaryDirectory() as td:
+            engine, svc = self._build_service(td)
+            try:
+                project = svc.create_project("FSM Test", date(2026, 3, 1))
+                # Fresh project is 'a_importer'; jump to 'pret_a_livrer' is illegal.
+                with self.assertRaises(ValueError):
+                    svc.update_project(project.id, status="pret_a_livrer")
+                # Status must be unchanged.
+                self.assertEqual(svc.get_project(project.id).status, "a_importer")
+            finally:
+                engine.dispose()
+
+    def test_update_project_accepts_valid_status_transition(self):
+        """update_project(status=...) must succeed for a valid FSM transition."""
+        with tempfile.TemporaryDirectory() as td:
+            engine, svc = self._build_service(td)
+            try:
+                project = svc.create_project("FSM OK", date(2026, 3, 1))
+                # a_importer → importe is valid.
+                svc.update_project(project.id, status="importe")
+                self.assertEqual(svc.get_project(project.id).status, "importe")
+            finally:
+                engine.dispose()
+
+    def test_update_project_rejects_unknown_status_string(self):
+        """update_project(status=...) must reject completely unknown status values."""
+        with tempfile.TemporaryDirectory() as td:
+            engine, svc = self._build_service(td)
+            try:
+                project = svc.create_project("FSM Unknown", date(2026, 3, 1))
+                with self.assertRaises(ValueError):
+                    svc.update_project(project.id, status="completely_invalid")
+            finally:
+                engine.dispose()
+
+
 if __name__ == '__main__':
     unittest.main()

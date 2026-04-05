@@ -8,6 +8,7 @@ from uuid import uuid4
 from sqlalchemy import select
 
 from ..models import Asset, Project
+from ..utils import sanitize_filename_part
 
 
 @dataclass(frozen=True)
@@ -224,6 +225,8 @@ class RenameService:
 
     def _build_plan(self, *, project: Project, assets: list[Asset], pattern: str, start_seq: int) -> list[dict]:
         safe_project = self._sanitize_stem(str(project.name))
+        safe_client  = self._sanitize_stem(project.client.name) if project.client else ""
+        safe_preset  = self._sanitize_stem(project.preset.name) if project.preset else ""
         shoot_date = project.shoot_date.strftime("%Y%m%d")
         clean_pattern = str(pattern or "").strip() or "{project}_{date}_{seq:04d}"
 
@@ -245,6 +248,8 @@ class RenameService:
                 shoot_date=shoot_date,
                 seq=seq,
                 orig=safe_orig,
+                client=safe_client,
+                preset=safe_preset,
             )
             seq += 1
             ext = source.suffix.lower()
@@ -265,33 +270,23 @@ class RenameService:
         return plan
 
     @staticmethod
-    def _format_target_stem(*, pattern: str, project: str, shoot_date: str, seq: int, orig: str) -> str:
+    def _format_target_stem(
+        *, pattern: str, project: str, shoot_date: str, seq: int, orig: str,
+        client: str = "", preset: str = "",
+    ) -> str:
         try:
-            raw = str(pattern).format(project=project, date=shoot_date, seq=int(seq), orig=orig)
+            raw = str(pattern).format(
+                project=project, date=shoot_date, seq=int(seq), orig=orig,
+                client=client, preset=preset,
+            )
         except Exception:
             raw = f"{project}_{shoot_date}_{int(seq):04d}"
-        cleaned = RenameService._sanitize_stem(raw)
+        cleaned = RenameService._sanitize_stem(raw)  # also collapses consecutive __
         return cleaned or f"{project}_{shoot_date}_{int(seq):04d}"
 
     @staticmethod
     def _sanitize_stem(value: str) -> str:
-        raw = str(value or "").strip()
-        if not raw:
-            return ""
-        forbidden = '<>:"/\\|?*'
-        safe_chars: list[str] = []
-        for char in raw:
-            if char in forbidden or ord(char) < 32:
-                safe_chars.append("_")
-                continue
-            if char.isalnum():
-                safe_chars.append(char)
-            else:
-                safe_chars.append("_")
-        cleaned = "".join(safe_chars).strip(" ._")
-        while "__" in cleaned:
-            cleaned = cleaned.replace("__", "_")
-        return cleaned or "image"
+        return sanitize_filename_part(value) or "image"
 
     @staticmethod
     def _path_key(path: Path) -> str:

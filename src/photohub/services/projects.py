@@ -248,7 +248,10 @@ class ProjectService:
                     project.root_path = clean_path
 
             if status is not None:
-                project.status = status
+                if not try_transition_project_status(project, status):
+                    raise ValueError(
+                        f"Transition de statut invalide: '{project.status}' \u2192 '{status}'"
+                    )
 
             if client_name is not None:
                 clean_client = client_name.strip()
@@ -281,17 +284,11 @@ class ProjectService:
             project.preset_id = preset_id
             session.commit()
 
-    def list_allowed_statuses(self) -> list[str]:
-        return list(PROJECT_STATUSES)
-
     def list_status_choices(self) -> list[tuple[str, str]]:
         return [(code, status_label(code)) for code in PROJECT_STATUSES]
 
     def get_status_label(self, status: str) -> str:
         return status_label(status)
-
-    def try_update_project_status(self, project: Project, status: str) -> bool:
-        return try_transition_project_status(project, status)
 
     def update_project_status(self, project_id: int, status: str) -> None:
         clean_status = (status or "").strip()

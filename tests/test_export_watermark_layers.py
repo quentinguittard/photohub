@@ -273,5 +273,57 @@ class ExportWatermarkLayerTests(unittest.TestCase):
         )
 
 
+class WatermarkCoordinateClampTests(unittest.TestCase):
+    """Regression tests for _anchored_position coordinate clamping."""
+
+    def test_large_positive_offset_clamped_to_upper_bound(self):
+        """A positive offset that pushes x/y beyond the canvas must be clamped."""
+        x, y = ExportService._anchored_position(
+            canvas_size=(100, 100),
+            layer_size=(30, 30),
+            anchor="bottom_right",
+            offset_x_pct=50,   # base_x=70, offset=+50 → raw x=120, clamped to 70
+            offset_y_pct=50,   # base_y=70, offset=+50 → raw y=120, clamped to 70
+        )
+        self.assertEqual(x, 70)
+        self.assertEqual(y, 70)
+
+    def test_large_negative_offset_clamped_to_zero(self):
+        """A negative offset that pushes x/y below zero must be clamped to 0."""
+        x, y = ExportService._anchored_position(
+            canvas_size=(100, 100),
+            layer_size=(30, 30),
+            anchor="top_left",
+            offset_x_pct=-50,  # base_x=0, offset=-50 → raw x=-50, clamped to 0
+            offset_y_pct=-50,  # base_y=0, offset=-50 → raw y=-50, clamped to 0
+        )
+        self.assertEqual(x, 0)
+        self.assertEqual(y, 0)
+
+    def test_in_bounds_position_unchanged(self):
+        """Coordinates already within bounds must not be altered."""
+        x, y = ExportService._anchored_position(
+            canvas_size=(200, 200),
+            layer_size=(40, 40),
+            anchor="top_left",
+            offset_x_pct=10,   # raw x=20, within [0, 160]
+            offset_y_pct=10,   # raw y=20, within [0, 160]
+        )
+        self.assertEqual(x, 20)
+        self.assertEqual(y, 20)
+
+    def test_layer_larger_than_canvas_clamped_to_zero(self):
+        """When the layer is wider than the canvas, dest must be (0, 0)."""
+        x, y = ExportService._anchored_position(
+            canvas_size=(50, 50),
+            layer_size=(200, 200),
+            anchor="center",
+            offset_x_pct=0,
+            offset_y_pct=0,
+        )
+        self.assertEqual(x, 0)
+        self.assertEqual(y, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

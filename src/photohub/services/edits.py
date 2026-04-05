@@ -15,6 +15,8 @@ DEFAULT_EDIT_SETTINGS: dict[str, object] = {
     "wb_temp": 5500,
     "wb_tint": 0,
     "crop_ratio": "original",
+    "crop_pan_x": 0,
+    "crop_pan_y": 0,
     "straighten": 0.0,
     "contrast": 0,
     "highlights": 0,
@@ -35,6 +37,7 @@ class EditAssetItem:
     src_path: str
     rating: int
     is_rejected: bool
+    color_label: str | None
     edit_settings: dict[str, object]
 
 
@@ -72,6 +75,7 @@ class EditService:
                     src_path=item.src_path,
                     rating=int(item.rating),
                     is_rejected=bool(item.is_rejected),
+                    color_label=item.color_label,
                     edit_settings=self._read_edit_settings(item),
                 )
                 for item in assets
@@ -109,12 +113,6 @@ class EditService:
 
             session.commit()
             return payload
-
-    def copy_edit_settings(self, source_asset_id: int, target_asset_id: int) -> dict[str, object]:
-        if int(source_asset_id) == int(target_asset_id):
-            return self.get_asset_edit_settings(target_asset_id)
-        source_payload = self.get_asset_edit_settings(source_asset_id)
-        return self.update_asset_edit_settings(target_asset_id, source_payload, replace=True)
 
     def sync_edit_settings_to_filtered(
         self,
@@ -217,6 +215,8 @@ class EditService:
             "wb_temp": as_int("wb_temp", 2000, 12000),
             "wb_tint": as_int("wb_tint", -100, 100),
             "crop_ratio": normalized_crop,
+            "crop_pan_x": as_int("crop_pan_x", -99999, 99999),
+            "crop_pan_y": as_int("crop_pan_y", -99999, 99999),
             "straighten": round(as_float("straighten", -45.0, 45.0), 2),
             "contrast": as_int("contrast", -100, 100),
             "highlights": as_int("highlights", -100, 100),

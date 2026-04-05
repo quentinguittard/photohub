@@ -11,6 +11,7 @@ from photohub.models import Asset
 from photohub.services.exports import ExportService
 from photohub.services.projects import ProjectService
 from photohub.services.quality_checks import QualityChecklistError
+from conftest import write_test_image as _write_image
 
 
 class ExportQualityGateTests(unittest.TestCase):
@@ -43,7 +44,7 @@ class ExportQualityGateTests(unittest.TestCase):
         rejected: bool = False,
     ) -> None:
         src = Path(root_path) / "raw" / file_name
-        src.write_bytes(b"image-bytes")
+        _write_image(src)
         with sf() as session:
             session.add(
                 Asset(
